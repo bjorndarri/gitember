@@ -80,8 +80,7 @@ public class WorkspaceDialog extends JDialog {
                 .model(projectModel)
                 .selectedItem()
                 .name("workspaceProjectList")
-                // a DefaultListCellRenderer, which cellRenderer(ListCellRenderer<Project>) does not accept
-                .onBuild(list -> list.setCellRenderer(new ProjectCellRenderer()))
+                .cellRenderer(new ProjectCellRenderer())
                 .build();
 
         setLayout(new BorderLayout());
