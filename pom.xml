@@ -26,6 +26,7 @@
         <tika.version>2.9.1</tika.version>
         <langchain4j.version>1.15.0</langchain4j.version>
         <twelvemonkeys.version>3.10.1</twelvemonkeys.version>
+        <codion.version>0.18.89</codion.version>
     </properties>
     <repositories>
         <repository>
@@ -167,6 +168,12 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-ollama</artifactId>
             <version>${langchain4j.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>is.codion</groupId>
+            <artifactId>codion-swing-common-ui</artifactId>
+            <version>${codion.version}</version>
         </dependency>
 
         <!-- OS keychain integration (macOS Keychain, Windows Credential Store, Linux Secret Service) -->

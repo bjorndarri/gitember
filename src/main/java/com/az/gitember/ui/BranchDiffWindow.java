@@ -6,6 +6,7 @@ import com.az.gitember.service.ExtensionMap;
 import com.az.gitember.service.LlmDiffDescriptionService;
 import com.az.gitember.service.OllamaManager;
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.model.worker.ProgressWorker;
 import org.eclipse.jgit.diff.DiffEntry;
 import org.kordamp.ikonli.fontawesome5.FontAwesomeSolid;
 
@@ -18,14 +19,12 @@ import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.LinkedHashMap;
+import java.util.*;
 import java.util.List;
-import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 /**
  * Branch diff window with two side-by-side synchronised trees, mirroring
@@ -166,31 +165,36 @@ public class BranchDiffWindow extends JFrame {
     }
 
     private JTree makeTree(BaseRenderer renderer) {
-        JTree t = new JTree(treeModel);
-        t.setUI(new FullRowTreeUI(renderer));
-        t.setRootVisible(false);
-        t.setShowsRootHandles(true);
-        t.setRowHeight(22);
-        t.setCellRenderer(renderer);
+        JTree t = tree()
+                .model(treeModel)
+                .rootVisible(false)
+                .showsRootHandles(true)
+                .rowHeight(22)
+                .cellRenderer(renderer)
+                .mouseListener(new MouseAdapter() {
+                    @Override
+                    public void mouseClicked(MouseEvent e) {
+                        if (e.getClickCount() != 2) return;
+                        TreePath path = ((JTree) e.getSource()).getPathForLocation(e.getX(), e.getY());
+                        if (path == null) return;
+                        DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
+                        if (node.isLeaf() && node.getUserObject() instanceof NodeData data && data.isFile())
+                            openEntry(data.entry);
+                    }
+                })
+                .build();
         t.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
-        t.addMouseListener(new MouseAdapter() {
-            @Override public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() != 2) return;
-                TreePath path = t.getPathForLocation(e.getX(), e.getY());
-                if (path == null) return;
-                DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
-                if (node.isLeaf() && node.getUserObject() instanceof NodeData data && data.isFile())
-                    openEntry(data.entry);
-            }
-        });
+        t.setUI(new FullRowTreeUI(renderer));
         return t;
     }
 
     private JPanel buildNavBar() {
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
-        bar.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
-        bar.add(prevBtn);
-        bar.add(nextBtn);
+        JPanel bar = panel()
+                .layout(new FlowLayout(FlowLayout.LEFT, 6, 4))
+                .border(BorderFactory.createEmptyBorder(2, 6, 2, 6))
+                .add(prevBtn)
+                .add(nextBtn)
+                .build();
         bar.add(Box.createHorizontalStrut(12));
         bar.add(statsLbl);
         if (aiDescBtn.isVisible()) {
@@ -202,34 +206,46 @@ public class BranchDiffWindow extends JFrame {
 
     /** Builds the central area: tree split pane + optional AI description panel below. */
     private JComponent buildCenter() {
-        aiTextArea = new JTextArea();
-        aiTextArea.setEditable(false);
-        aiTextArea.setLineWrap(true);
-        aiTextArea.setWrapStyleWord(true);
-        aiTextArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
-        aiTextArea.setMargin(new Insets(8, 10, 8, 10));
+        aiTextArea = textArea()
+                .editable(false)
+                .lineWrap(true)
+                .wrapStyleWord(true)
+                .font(new Font(Font.SANS_SERIF, Font.PLAIN, 13))
+                .margin(new Insets(8, 10, 8, 10))
+                .build();
 
-        JScrollPane aiScroll = new JScrollPane(aiTextArea);
-        aiScroll.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0,
-                UIManager.getColor("Separator.foreground")));
+        JScrollPane aiScroll = scrollPane()
+                .view(aiTextArea)
+                .border(BorderFactory.createMatteBorder(1, 0, 0, 0,
+                        UIManager.getColor("Separator.foreground")))
+                .build();
 
-        JLabel aiHeader = new JLabel(" AI Change Description");
-        aiHeader.setFont(aiHeader.getFont().deriveFont(Font.BOLD, 12f));
-        aiHeader.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(1, 0, 1, 0,
-                        UIManager.getColor("Separator.foreground")),
-                BorderFactory.createEmptyBorder(3, 6, 3, 6)));
-        aiHeader.setOpaque(true);
+        JLabel aiHeader = label(" AI Change Description")
+                .font(font -> font.deriveFont(Font.BOLD, 12f))
+                .border(BorderFactory.createCompoundBorder(
+                        BorderFactory.createMatteBorder(1, 0, 1, 0,
+                                UIManager.getColor("Separator.foreground")),
+                        BorderFactory.createEmptyBorder(3, 6, 3, 6)))
+                .opaque(true)
+                .build();
 
-        aiPanel = new JPanel(new BorderLayout());
-        aiPanel.add(aiHeader, BorderLayout.NORTH);
-        aiPanel.add(aiScroll, BorderLayout.CENTER);
-        aiPanel.setVisible(false);
+        aiPanel = borderLayoutPanel()
+                .layout(new BorderLayout())
+                .north(aiHeader)
+                .center(aiScroll)
+                .visible(false)
+                .build();
 
-        mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, buildSplit(), aiPanel);
-        mainSplit.setResizeWeight(0.65);
-        mainSplit.setDividerSize(5);
+        mainSplit = splitPane()
+                .orientation(JSplitPane.VERTICAL_SPLIT)
+                .leftComponent(buildSplit())
+                .rightComponent(aiPanel)
+                .resizeWeight(0.65)
+                .dividerSize(5)
+                .build();
+
         mainSplit.setDividerLocation(Integer.MAX_VALUE);  // hide until shown
+
         return mainSplit;
     }
 
@@ -237,8 +253,12 @@ public class BranchDiffWindow extends JFrame {
         styleHeader(leftHeader);
         styleHeader(rightHeader);
 
-        JScrollPane leftScroll  = new JScrollPane(leftTree);
-        JScrollPane rightScroll = new JScrollPane(rightTree);
+        JScrollPane leftScroll  = scrollPane()
+                .view(leftTree)
+                .build();
+        JScrollPane rightScroll = scrollPane()
+                .view(rightTree)
+                .build();
 
         leftScroll.getVerticalScrollBar().addAdjustmentListener(e -> {
             if (!syncingScroll) { syncingScroll = true;
@@ -249,18 +269,19 @@ public class BranchDiffWindow extends JFrame {
                 leftScroll.getVerticalScrollBar().setValue(e.getValue()); syncingScroll = false; }
         });
 
-        JPanel leftPanel  = new JPanel(new BorderLayout());
-        leftPanel.add(leftHeader,  BorderLayout.NORTH);
-        leftPanel.add(leftScroll,  BorderLayout.CENTER);
-
-        JPanel rightPanel = new JPanel(new BorderLayout());
-        rightPanel.add(rightHeader, BorderLayout.NORTH);
-        rightPanel.add(rightScroll, BorderLayout.CENTER);
-
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, rightPanel);
-        split.setResizeWeight(0.5);
-        split.setDividerSize(5);
-        return split;
+        return splitPane()
+                .orientation(JSplitPane.HORIZONTAL_SPLIT)
+                .leftComponent(borderLayoutPanel()
+                        .layout(new BorderLayout())
+                        .north(leftHeader)
+                        .center(leftScroll))
+                .rightComponent(borderLayoutPanel()
+                        .layout(new BorderLayout())
+                        .north(rightHeader)
+                        .center(rightScroll))
+                .resizeWeight(0.5)
+                .dividerSize(5)
+                .build();
     }
 
     private static void styleHeader(JLabel lbl) {
@@ -302,27 +323,23 @@ public class BranchDiffWindow extends JFrame {
 
     private void loadDiff() {
         statsLbl.setText("Computing diff…");
-        new SwingWorker<List<DiffEntry>, Void>() {
-            @Override protected List<DiffEntry> doInBackground() throws Exception {
-                return Context.getGitRepoService().getBranchDiff(branchARef, branchBRef);
-            }
-            @Override protected void done() {
-                try {
-                    List<DiffEntry> raw = get();
+        ProgressWorker.builder()
+                .task(() -> Context.getGitRepoService().getBranchDiff(branchARef, branchBRef))
+                .onResult(raw -> {
                     allEntries = toEntries(raw);
                     leftHeader.setText(branchALabel);
                     rightHeader.setText(branchBLabel);
                     rebuildTree();
                     updateStats();
-                } catch (Exception ex) {
+                })
+                .onException(ex -> {
                     log.log(Level.WARNING, "Branch diff failed", ex);
-                    statsLbl.setText("Error: " + ex.getMessage());
-                    JOptionPane.showMessageDialog(BranchDiffWindow.this,
-                            "Cannot compute branch diff:\n" + ex.getMessage(),
+                    statsLbl.setText("Error: " + ex.toString());
+                    JOptionPane.showMessageDialog(this,
+                            "Cannot compute branch diff:\n" + ex.toString(),
                             "Error", JOptionPane.ERROR_MESSAGE);
-                }
-            }
-        }.execute();
+                })
+                .execute();
     }
 
     private static List<BranchEntry> toEntries(List<DiffEntry> raw) {
@@ -459,27 +476,24 @@ public class BranchDiffWindow extends JFrame {
         String modelName  = Context.getSettings() != null
                 ? Context.getSettings().getLlmDetectorModel() : Settings.DEFAULT_LLM_DETECTOR_MODEL;
 
-        new SwingWorker<String, Void>() {
-            @Override
-            protected String doInBackground() throws Exception {
-                String diffText = Context.getGitRepoService()
-                        .getBranchDiffText(branchARef, branchBRef, LlmDiffDescriptionService.MAX_DIFF_CHARS);
-                return LlmDiffDescriptionService.describe(
-                        diffText, branchALabel, branchBLabel,
-                        Context.getProjectFolder(), ollamaUrl, modelName);
-            }
-            @Override
-            protected void done() {
-                aiDescBtn.setEnabled(true);
-                try {
-                    aiTextArea.setText(get());
+        ProgressWorker.builder()
+                .task(() -> {
+                    String diffText = Context.getGitRepoService()
+                            .getBranchDiffText(branchARef, branchBRef, LlmDiffDescriptionService.MAX_DIFF_CHARS);
+                    return LlmDiffDescriptionService.describe(
+                            diffText, branchALabel, branchBLabel,
+                            Context.getProjectFolder(), ollamaUrl, modelName);
+                })
+                .onDone(() -> aiDescBtn.setEnabled(true))
+                .onResult(description -> {
+                    aiTextArea.setText(description);
                     aiTextArea.setCaretPosition(0);
-                } catch (Exception ex) {
+                })
+                .onException(ex -> {
                     log.log(Level.WARNING, "AI description failed", ex);
-                    aiTextArea.setText("Failed to generate description:\n" + ex.getMessage());
-                }
-            }
-        }.execute();
+                    aiTextArea.setText("Failed to generate description:\n" + ex.toString());
+                })
+                .execute();
     }
 
     // ── Open actions ──────────────────────────────────────────────────────────
@@ -507,56 +521,36 @@ public class BranchDiffWindow extends JFrame {
             String rightPath = DiffEntry.DEV_NULL.equals(d.getNewPath()) ? d.getOldPath() : d.getNewPath();
 
             if (ExtensionMap.isImage(entry.path())) {
-                new SwingWorker<File[], Void>() {
-                    @Override
-                    protected File[] doInBackground() throws Exception {
-                        File leftFile = null;
-                        File rightFile = null;
-                        try {
-                            leftFile = new File(Context.getGitRepoService().saveFile(branchARef, leftPath));
-                        } catch (Exception ignored) {
-                        }
-                        try {
-                            rightFile = new File(Context.getGitRepoService().saveFile(branchBRef, rightPath));
-                        } catch (Exception ignored) {
-                        }
-                        return new File[]{leftFile, rightFile};
-                    }
-                    @Override
-                    protected void done() {
-                        try {
-                            File[] files = get();
-                            new DiffViewerWindowImg(entry.path(),
-                                    branchALabel, files[0],
-                                    branchBLabel, files[1]).setVisible(true);
-                        } catch (Exception ex) {
-                            log.log(Level.WARNING, "Failed to open image diff", ex);
-                            JOptionPane.showMessageDialog(BranchDiffWindow.this,
-                                    "Cannot open diff:\n" + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-                        }
-                    }
-                }.execute();
+                ProgressWorker.builder()
+                        .task(() -> {
+                            File leftFile = null;
+                            File rightFile = null;
+                            try {
+                                leftFile = new File(Context.getGitRepoService().saveFile(branchARef, leftPath));
+                            } catch (Exception ignored) {
+                            }
+                            try {
+                                rightFile = new File(Context.getGitRepoService().saveFile(branchBRef, rightPath));
+                            } catch (Exception ignored) {
+                            }
+                            return new File[]{leftFile, rightFile};
+                        })
+                        .onResult(files -> new DiffViewerWindowImg(entry.path(),
+                                branchALabel, files[0],
+                                branchBLabel, files[1]).setVisible(true))
+                        .onException(ex -> openFailed("Failed to open image diff", "Cannot open diff", ex))
+                        .execute();
             } else {
-                new SwingWorker<String[], Void>() {
-                    @Override protected String[] doInBackground() throws Exception {
-                        return new String[]{
-                            Context.getGitRepoService().getFileContentAtRef(branchARef, leftPath),
-                            Context.getGitRepoService().getFileContentAtRef(branchBRef, rightPath)
-                        };
-                    }
-                    @Override protected void done() {
-                        try {
-                            String[] contents = get();
-                            new DiffViewerWindowTxt(entry.path(),
-                                    branchALabel, contents[0],
-                                    branchBLabel, contents[1]).setVisible(true);
-                        } catch (Exception ex) {
-                            log.log(Level.WARNING, "Failed to open diff", ex);
-                            JOptionPane.showMessageDialog(BranchDiffWindow.this,
-                                    "Cannot open diff:\n" + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-                        }
-                    }
-                }.execute();
+                ProgressWorker.builder()
+                        .task(() -> new String[]{
+                                Context.getGitRepoService().getFileContentAtRef(branchARef, leftPath),
+                                Context.getGitRepoService().getFileContentAtRef(branchBRef, rightPath)
+                        })
+                        .onResult(contents -> new DiffViewerWindowTxt(entry.path(),
+                                branchALabel, contents[0],
+                                branchBLabel, contents[1]).setVisible(true))
+                        .onException(ex -> openFailed("Failed to open diff", "Cannot open diff", ex))
+                        .execute();
             }
         }
     }
@@ -570,20 +564,17 @@ public class BranchDiffWindow extends JFrame {
                 ? (DiffEntry.DEV_NULL.equals(d.getOldPath()) ? d.getNewPath() : d.getOldPath())
                 : (DiffEntry.DEV_NULL.equals(d.getNewPath()) ? d.getOldPath() : d.getNewPath());
 
-        new SwingWorker<String, Void>() {
-            @Override protected String doInBackground() throws Exception {
-                return Context.getGitRepoService().getFileContentAtRef(ref, path);
-            }
-            @Override protected void done() {
-                try {
-                    new FileViewerWindow(path + "  [" + branchLbl + "]", get(), path).setVisible(true);
-                } catch (Exception ex) {
-                    log.log(Level.WARNING, "Failed to open file", ex);
-                    JOptionPane.showMessageDialog(BranchDiffWindow.this,
-                            "Cannot open file:\n" + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-                }
-            }
-        }.execute();
+        ProgressWorker.builder()
+                .task(() -> Context.getGitRepoService().getFileContentAtRef(ref, path))
+                .onResult(result -> new FileViewerWindow(path + "  [" + branchLbl + "]", result, path).setVisible(true))
+                .onException(ex -> openFailed("Failed to open file", "Cannot open file", ex))
+                .execute();
+    }
+
+    private void openFailed(String logMessage, String errorMessage, Exception ex) {
+        log.log(Level.WARNING, logMessage, ex);
+        JOptionPane.showMessageDialog(this,
+                errorMessage + ":\n" + ex.toString(), "Error", JOptionPane.ERROR_MESSAGE);
     }
 
     // ── Context menu ──────────────────────────────────────────────────────────
@@ -626,20 +617,22 @@ public class BranchDiffWindow extends JFrame {
     // ── Legend ────────────────────────────────────────────────────────────────
 
     private static JPanel buildLegend() {
-        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 2));
-        p.setBorder(BorderFactory.createEmptyBorder(2, 6, 4, 6));
-        p.add(chip(SyntaxStyleUtil.changedBg(),  "Modified  " + EntryStatus.DIFFERENT.label));
-        p.add(chip(SyntaxStyleUtil.deletedBg(),  "Deleted (left only)  " + EntryStatus.LEFT_ONLY.label));
-        p.add(chip(SyntaxStyleUtil.addedBg(),    "Added (right only)  " + EntryStatus.RIGHT_ONLY.label));
-        return p;
+        return panel()
+                .layout(new FlowLayout(FlowLayout.LEFT, 10, 2))
+                .border(BorderFactory.createEmptyBorder(2, 6, 4, 6))
+                .add(chip(SyntaxStyleUtil.changedBg(),  "Modified  " + EntryStatus.DIFFERENT.label))
+                .add(chip(SyntaxStyleUtil.deletedBg(),  "Deleted (left only)  " + EntryStatus.LEFT_ONLY.label))
+                .add(chip(SyntaxStyleUtil.addedBg(),    "Added (right only)  " + EntryStatus.RIGHT_ONLY.label))
+                .build();
     }
 
     private static JLabel chip(Color bg, String text) {
-        JLabel l = new JLabel(" " + text + " ");
-        l.setOpaque(bg != null);
+        JLabel l = label(" " + text + " ")
+                .opaque(bg != null)
+                .font(font -> font.deriveFont(Font.PLAIN, 11f))
+                .border(BorderFactory.createLineBorder(Color.GRAY))
+                .build();
         if (bg != null) l.setBackground(bg);
-        l.setFont(l.getFont().deriveFont(Font.PLAIN, 11f));
-        l.setBorder(BorderFactory.createLineBorder(Color.GRAY));
         return l;
     }
 
