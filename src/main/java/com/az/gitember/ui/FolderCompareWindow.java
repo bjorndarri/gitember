@@ -4,6 +4,13 @@ import com.az.gitember.data.Settings;
 import com.az.gitember.service.Context;
 import com.az.gitember.service.ExtensionMap;
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.model.worker.ProgressWorker;
+import is.codion.common.reactive.state.State;
+import is.codion.common.reactive.value.Value;
+import is.codion.swing.common.ui.Utilities;
+import is.codion.swing.common.ui.component.text.FileInput;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.control.Controls;
 import org.kordamp.ikonli.fontawesome5.FontAwesomeSolid;
 
 import javax.swing.*;
@@ -12,8 +19,6 @@ import javax.swing.event.TreeExpansionListener;
 import javax.swing.plaf.basic.BasicTreeUI;
 import javax.swing.tree.*;
 import java.awt.*;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
 import java.io.File;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -22,6 +27,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 /**
  * Folder comparison window with two side-by-side synchronised trees.
@@ -59,14 +66,9 @@ public class FolderCompareWindow extends JFrame {
 
     // ── UI ────────────────────────────────────────────────────────────────────
 
-    private final JTextField leftPathField  = new JTextField();
-    private final JTextField rightPathField = new JTextField();
-    private final JButton    compareBtn     = new JButton("Compare");
-
     private final JLabel leftHeader  = new JLabel(" ");
     private final JLabel rightHeader = new JLabel(" ");
 
-    private final JToggleButton diffsOnlyBtn = new JToggleButton("Differences only");
     private final JButton prevBtn  = Util.createButton("Prev", "Previous difference", FontAwesomeSolid.ARROW_UP);
     private final JButton nextBtn  = Util.createButton("Next", "Next difference",  FontAwesomeSolid.ARROW_DOWN);
     private final JLabel  statsLbl = new JLabel(" ");
@@ -84,6 +86,16 @@ public class FolderCompareWindow extends JFrame {
     private boolean                        syncingScroll     = false;
     private boolean                        syncingSelection  = false;
 
+    private final Value<String> leftPath     = Value.nonNull("");
+    private final Value<String> rightPath    = Value.nonNull("");
+    private final State         scanning     = State.state();
+    private final State         diffsOnly    = State.state();
+    private final State         diffsPresent = State.state();
+    // what can be opened for the entry selected in the trees, whose selection is synchronised
+    private final State diffSelected      = State.state();
+    private final State leftFileSelected  = State.state();
+    private final State rightFileSelected = State.state();
+
     // ── Construction ──────────────────────────────────────────────────────────
 
     public FolderCompareWindow() {
@@ -95,20 +107,19 @@ public class FolderCompareWindow extends JFrame {
         setLocationRelativeTo(MainFrame.getInstance());
 
         treeModel = new DefaultTreeModel(new DefaultMutableTreeNode("root"));
-        leftTree  = makeTree(new LeftRenderer());
-        rightTree = makeTree(new RightRenderer());
+        Controls contextMenu = contextMenuControls();
+        leftTree  = makeTree(new LeftRenderer(), contextMenu);
+        rightTree = makeTree(new RightRenderer(), contextMenu);
 
         wireExpansionSync(leftTree,  rightTree);
         wireExpansionSync(rightTree, leftTree);
         wireSelectionSync(leftTree,  rightTree);
         wireSelectionSync(rightTree, leftTree);
 
-        setupContextMenu(leftTree);
-        setupContextMenu(rightTree);
+        leftTree.addTreeSelectionListener(e -> selectionChanged());
 
-        prevBtn.setEnabled(false);
-        nextBtn.setEnabled(false);
-        diffsOnlyBtn.addActionListener(e -> applyFilter());
+        Utilities.enabled(diffsPresent, prevBtn, nextBtn);
+        diffsOnly.addListener(this::applyFilter);
         prevBtn.addActionListener(e -> navigateDiff(-1));
         nextBtn.addActionListener(e -> navigateDiff(+1));
 
@@ -117,17 +128,13 @@ public class FolderCompareWindow extends JFrame {
         getContentPane().add(buildSplit(),    BorderLayout.CENTER);
         getContentPane().add(buildLegend(),  BorderLayout.SOUTH);
 
-        CompareFilesDialog.attachFileDrop(leftPathField,  true);
-        CompareFilesDialog.attachFileDrop(rightPathField, true);
-        compareBtn.addActionListener(e -> startScan());
-
         Util.bindEscapeToDispose(this);
     }
 
     /** Pre-fill both paths and start the scan immediately (used by CLI invocation). */
     public void compare(String leftPath, String rightPath) {
-        leftPathField.setText(leftPath);
-        rightPathField.setText(rightPath);
+        this.leftPath.set(leftPath);
+        this.rightPath.set(rightPath);
         startScan();
     }
 
@@ -168,65 +175,72 @@ public class FolderCompareWindow extends JFrame {
         }
     }
 
-    private JTree makeTree(BaseRenderer renderer) {
-        JTree t = new JTree(treeModel);
-        t.setUI(new FullRowTreeUI(renderer));
-        t.setRootVisible(false);
-        t.setShowsRootHandles(true);
-        t.setRowHeight(22);
-        t.setCellRenderer(renderer);
-        t.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
-        t.addMouseListener(new MouseAdapter() {
-            @Override public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() != 2) return;
-                TreePath path = t.getPathForLocation(e.getX(), e.getY());
-                if (path == null) return;
-                DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
-                if (node.isLeaf() && node.getUserObject() instanceof NodeData data && data.isFile())
-                    openEntry(data.entry);
-            }
-        });
-        return t;
+    private JTree makeTree(BaseRenderer renderer, Controls contextMenu) {
+        return tree()
+                .model(treeModel)
+                .ui(new FullRowTreeUI(renderer))
+                .rootVisible(false)
+                .showsRootHandles(true)
+                .rowHeight(22)
+                .cellRenderer(renderer)
+                .selectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION)
+                // the selections are synced, so leftTree holds the double-clicked node
+                .doubleClick(Control.command(() -> openEntry(entryFromTree(leftTree))))
+                .popupControls(tree -> contextMenu)
+                .build();
     }
 
     private JPanel buildTopBar() {
-        // path selector
-        JPanel pathBar = new JPanel(new GridBagLayout());
-        pathBar.setBorder(BorderFactory.createEmptyBorder(6, 8, 4, 8));
-        JButton browseLeft  = new JButton("Browse…");
-        JButton browseRight = new JButton("Browse…");
-        browseLeft .addActionListener(e -> browse(leftPathField));
-        browseRight.addActionListener(e -> browse(rightPathField));
+        // the inputs share the width, the compare button between them
+        JPanel pathBar = form()
+                .columns(2)
+                .border(BorderFactory.createEmptyBorder(6, 8, 4, 8))
+                .add(pathInput(leftPath))
+                .add(button()
+                        .control(Control.builder()
+                                .command(this::startScan)
+                                .caption("Compare")
+                                .enabled(scanning.not())), pathInput(rightPath))
+                .build();
 
-        GridBagConstraints c = new GridBagConstraints();
-        c.insets = new Insets(2, 3, 2, 3); c.gridy = 0;
-        c.gridx = 0; c.weightx = 0;    c.fill = GridBagConstraints.NONE;       pathBar.add(browseLeft, c);
-        c.gridx = 1; c.weightx = 0.45; c.fill = GridBagConstraints.HORIZONTAL; pathBar.add(leftPathField, c);
-        c.gridx = 2; c.weightx = 0;    c.fill = GridBagConstraints.NONE;       pathBar.add(compareBtn, c);
-        c.gridx = 3; c.weightx = 0.45; c.fill = GridBagConstraints.HORIZONTAL; pathBar.add(rightPathField, c);
-        c.gridx = 4; c.weightx = 0;    c.fill = GridBagConstraints.NONE;       pathBar.add(browseRight, c);
+        JPanel filterBar = panel()
+                .layout(new FlowLayout(FlowLayout.LEFT, 6, 2))
+                .add(toggleButton()
+                        .text("Differences only")
+                        .link(diffsOnly))
+                .add(new JSeparator(SwingConstants.VERTICAL))
+                .add(prevBtn)
+                .add(nextBtn)
+                .add((JComponent) Box.createHorizontalStrut(12))
+                .add(statsLbl)
+                .build();
 
-        // filter / navigation
-        JPanel filterBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-        filterBar.add(diffsOnlyBtn);
-        filterBar.add(new JSeparator(SwingConstants.VERTICAL));
-        filterBar.add(prevBtn);
-        filterBar.add(nextBtn);
-        filterBar.add(Box.createHorizontalStrut(12));
-        filterBar.add(statsLbl);
+        return borderLayoutPanel()
+                .layout(new BorderLayout())
+                .north(pathBar)
+                .south(filterBar)
+                .build();
+    }
 
-        JPanel top = new JPanel(new BorderLayout());
-        top.add(pathBar,   BorderLayout.NORTH);
-        top.add(filterBar, BorderLayout.SOUTH);
-        return top;
+    private static FileInput.Builder<Path> pathInput(Value<String> path) {
+        return directoryInput()
+                .dialogTitle("Select folder")
+                .filePathField(field -> field
+                        .editable(true)
+                        .link(path)
+                        .onBuild(f -> CompareFilesDialog.attachFileDrop(f, true)));
     }
 
     private JSplitPane buildSplit() {
         styleHeader(leftHeader);
         styleHeader(rightHeader);
 
-        JScrollPane leftScroll  = new JScrollPane(leftTree);
-        JScrollPane rightScroll = new JScrollPane(rightTree);
+        JScrollPane leftScroll  = scrollPane()
+                .view(leftTree)
+                .build();
+        JScrollPane rightScroll = scrollPane()
+                .view(rightTree)
+                .build();
 
         // Sync vertical scrolling
         leftScroll.getVerticalScrollBar().addAdjustmentListener(e -> {
@@ -238,18 +252,19 @@ public class FolderCompareWindow extends JFrame {
                 leftScroll.getVerticalScrollBar().setValue(e.getValue()); syncingScroll = false; }
         });
 
-        JPanel leftPanel  = new JPanel(new BorderLayout());
-        leftPanel.add(leftHeader,  BorderLayout.NORTH);
-        leftPanel.add(leftScroll,  BorderLayout.CENTER);
-
-        JPanel rightPanel = new JPanel(new BorderLayout());
-        rightPanel.add(rightHeader, BorderLayout.NORTH);
-        rightPanel.add(rightScroll, BorderLayout.CENTER);
-
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, rightPanel);
-        split.setResizeWeight(0.5);
-        split.setDividerSize(5);
-        return split;
+        return splitPane()
+                .orientation(JSplitPane.HORIZONTAL_SPLIT)
+                .leftComponent(borderLayoutPanel()
+                        .layout(new BorderLayout())
+                        .north(leftHeader)
+                        .center(leftScroll))
+                .rightComponent(borderLayoutPanel()
+                        .layout(new BorderLayout())
+                        .north(rightHeader)
+                        .center(rightScroll))
+                .resizeWeight(0.5)
+                .dividerSize(5)
+                .build();
     }
 
     private static void styleHeader(JLabel lbl) {
@@ -288,8 +303,8 @@ public class FolderCompareWindow extends JFrame {
     // ── Scanning ──────────────────────────────────────────────────────────────
 
     private void startScan() {
-        String leftStr  = leftPathField.getText().trim();
-        String rightStr = rightPathField.getText().trim();
+        String leftStr  = leftPath.get().trim();
+        String rightStr = rightPath.get().trim();
         if (leftStr.isEmpty() || rightStr.isEmpty()) {
             JOptionPane.showMessageDialog(this, "Please select both folders.",
                     "Compare Folders", JOptionPane.WARNING_MESSAGE);
@@ -303,31 +318,27 @@ public class FolderCompareWindow extends JFrame {
             return;
         }
 
-        compareBtn.setEnabled(false);
+        scanning.set(true);
         statsLbl.setText("Scanning…");
         treeModel.setRoot(new DefaultMutableTreeNode("root"));
-        prevBtn.setEnabled(false);
-        nextBtn.setEnabled(false);
+        diffsPresent.set(false);
 
-        new SwingWorker<List<FolderEntry>, Void>() {
-            @Override protected List<FolderEntry> doInBackground() throws Exception {
-                return scan(leftRoot, rightRoot);
-            }
-            @Override protected void done() {
-                compareBtn.setEnabled(true);
-                try {
-                    allEntries = get();
+        ProgressWorker.builder()
+                .task(() -> scan(leftRoot, rightRoot))
+                .onDone(() -> scanning.set(false))
+                .onResult(entries -> {
+                    allEntries = entries;
                     currentDiffIdx = -1;
                     leftHeader.setText(leftStr);
                     rightHeader.setText(rightStr);
                     applyFilter();
                     updateStats();
-                } catch (Exception ex) {
+                })
+                .onException(ex -> {
                     log.log(Level.WARNING, "Folder scan failed", ex);
-                    statsLbl.setText("Error: " + ex.getMessage());
-                }
-            }
-        }.execute();
+                    statsLbl.setText("Error: " + ex.toString());
+                })
+                .execute();
     }
 
     private List<FolderEntry> scan(Path leftRoot, Path rightRoot) throws Exception {
@@ -434,7 +445,7 @@ public class FolderCompareWindow extends JFrame {
     // ── Filter & navigation ───────────────────────────────────────────────────
 
     private void applyFilter() {
-        List<FolderEntry> visible = diffsOnlyBtn.isSelected()
+        List<FolderEntry> visible = diffsOnly.is()
                 ? allEntries.stream().filter(e -> e.status() != EntryStatus.IDENTICAL).toList()
                 : allEntries;
 
@@ -455,8 +466,7 @@ public class FolderCompareWindow extends JFrame {
                 diffNodes.add(node);
         }
         currentDiffIdx = -1;
-        prevBtn.setEnabled(!diffNodes.isEmpty());
-        nextBtn.setEnabled(!diffNodes.isEmpty());
+        diffsPresent.set(!diffNodes.isEmpty());
     }
 
     private void navigateDiff(int direction) {
@@ -509,29 +519,23 @@ public class FolderCompareWindow extends JFrame {
                     && ExtensionMap.isImage(rf.getName());
             if (image) {
                 new DiffViewerWindowImg(entry.relativePath(),
-                        leftPathField.getText().trim(), lf,
-                        rightPathField.getText().trim(), rf).setVisible(true);
+                        leftPath.get().trim(), lf,
+                        rightPath.get().trim(), rf).setVisible(true);
             } else if (CompareFilesDialog.looksLikeBinary(lf) || CompareFilesDialog.looksLikeBinary(rf)) {
                 JOptionPane.showMessageDialog(this, entry.relativePath() + " appears to be binary.",
                         "Binary file", JOptionPane.WARNING_MESSAGE);
             } else {
-                new SwingWorker<String[], Void>() {
-                    @Override protected String[] doInBackground() throws Exception {
-                        return new String[]{ Files.readString(lf.toPath()), Files.readString(rf.toPath()) };
-                    }
-                    @Override protected void done() {
-                        try {
-                            String[] t = get();
-                            new DiffViewerWindowTxt(entry.relativePath(),
-                                    leftPathField.getText().trim(),  t[0],
-                                    rightPathField.getText().trim(), t[1]).setVisible(true);
-                        } catch (Exception ex) {
+                ProgressWorker.builder()
+                        .task(() -> new String[]{ Files.readString(lf.toPath()), Files.readString(rf.toPath()) })
+                        .onResult(t -> new DiffViewerWindowTxt(entry.relativePath(),
+                                leftPath.get().trim(),  t[0],
+                                rightPath.get().trim(), t[1]).setVisible(true))
+                        .onException(ex -> {
                             log.log(Level.WARNING, "Failed to open diff", ex);
-                            JOptionPane.showMessageDialog(FolderCompareWindow.this,
-                                    "Cannot open diff: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-                        }
-                    }
-                }.execute();
+                            JOptionPane.showMessageDialog(this,
+                                    "Cannot open diff: " + ex.toString(), "Error", JOptionPane.ERROR_MESSAGE);
+                        })
+                        .execute();
             }
         }
     }
@@ -544,84 +548,66 @@ public class FolderCompareWindow extends JFrame {
                     "Binary file", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        new SwingWorker<String, Void>() {
-            @Override protected String  doInBackground() throws Exception { return Files.readString(f.toPath()); }
-            @Override protected void done() {
-                try { new FileViewerWindow(relPath, get(), relPath).setVisible(true); }
-                catch (Exception ex) { log.log(Level.WARNING, "Failed to open file", ex); }
-            }
-        }.execute();
-    }
-
-    // ── Browse ────────────────────────────────────────────────────────────────
-
-    private void browse(JTextField target) {
-        JFileChooser fc = new JFileChooser();
-        fc.setDialogTitle("Select folder");
-        fc.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        if (!target.getText().isBlank()) {
-            File cur = new File(target.getText().trim());
-            if (cur.isDirectory()) fc.setCurrentDirectory(cur);
-        }
-        if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
-            target.setText(fc.getSelectedFile().getAbsolutePath());
+        ProgressWorker.builder()
+                .task(() -> Files.readString(f.toPath()))
+                .onResult(content -> new FileViewerWindow(relPath, content, relPath).setVisible(true))
+                .onException(ex -> log.log(Level.WARNING, "Failed to open file", ex))
+                .execute();
     }
 
     // ── Context menu ──────────────────────────────────────────────────────────
 
-    private void setupContextMenu(JTree tree) {
-        JPopupMenu menu      = new JPopupMenu();
-        JMenuItem diffItem   = new JMenuItem("Open diff");
-        JMenuItem leftItem   = new JMenuItem("Open left file");
-        JMenuItem rightItem  = new JMenuItem("Open right file");
+    private Controls contextMenuControls() {
+        return Controls.builder()
+                .control(Control.builder()
+                        .command(() -> openDiff(entryFromTree(leftTree)))
+                        .caption("Open diff")
+                        .enabled(diffSelected))
+                .separator()
+                .control(Control.builder()
+                        .command(() -> {
+                            FolderEntry en = entryFromTree(leftTree);
+                            if (en != null) openSingle(en.leftAbsPath(), en.relativePath());
+                        })
+                        .caption("Open left file")
+                        .enabled(leftFileSelected))
+                .control(Control.builder()
+                        .command(() -> {
+                            FolderEntry en = entryFromTree(leftTree);
+                            if (en != null) openSingle(en.rightAbsPath(), en.relativePath());
+                        })
+                        .caption("Open right file")
+                        .enabled(rightFileSelected))
+                .build();
+    }
 
-        diffItem .addActionListener(e -> openDiff(entryFromTree(tree)));
-        leftItem .addActionListener(e -> { FolderEntry en = entryFromTree(tree); if (en != null) openSingle(en.leftAbsPath(),  en.relativePath()); });
-        rightItem.addActionListener(e -> { FolderEntry en = entryFromTree(tree); if (en != null) openSingle(en.rightAbsPath(), en.relativePath()); });
-
-        menu.add(diffItem); menu.addSeparator(); menu.add(leftItem); menu.add(rightItem);
-
-        menu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
-            @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
-                FolderEntry en = entryFromTree(tree);
-                diffItem .setEnabled(en != null && en.leftAbsPath()  != null && en.rightAbsPath() != null);
-                leftItem .setEnabled(en != null && en.leftAbsPath()  != null);
-                rightItem.setEnabled(en != null && en.rightAbsPath() != null);
-            }
-            @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {}
-            @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {}
-        });
-
-        tree.addMouseListener(new MouseAdapter() {
-            private void show(MouseEvent e) {
-                if (!e.isPopupTrigger()) return;
-                TreePath p = tree.getPathForLocation(e.getX(), e.getY());
-                if (p != null) tree.setSelectionPath(p);
-                menu.show(tree, e.getX(), e.getY());
-            }
-            @Override public void mousePressed(MouseEvent e)  { show(e); }
-            @Override public void mouseReleased(MouseEvent e) { show(e); }
-        });
+    private void selectionChanged() {
+        FolderEntry en = entryFromTree(leftTree);
+        diffSelected.set(en != null && en.leftAbsPath() != null && en.rightAbsPath() != null);
+        leftFileSelected.set(en != null && en.leftAbsPath() != null);
+        rightFileSelected.set(en != null && en.rightAbsPath() != null);
     }
 
     // ── Legend ────────────────────────────────────────────────────────────────
 
     private static JPanel buildLegend() {
-        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 2));
-        p.setBorder(BorderFactory.createEmptyBorder(2, 6, 4, 6));
-        p.add(chip(SyntaxStyleUtil.changedBg(), "Different  " + EntryStatus.DIFFERENT.label));
-        p.add(chip(SyntaxStyleUtil.deletedBg(), "Left only  " + EntryStatus.LEFT_ONLY.label));
-        p.add(chip(SyntaxStyleUtil.addedBg(),   "Right only  " + EntryStatus.RIGHT_ONLY.label));
-        p.add(chip(null,                           "Identical"));
-        return p;
+        return panel()
+                .layout(new FlowLayout(FlowLayout.LEFT, 10, 2))
+                .border(BorderFactory.createEmptyBorder(2, 6, 4, 6))
+                .add(chip(SyntaxStyleUtil.changedBg(), "Different  " + EntryStatus.DIFFERENT.label))
+                .add(chip(SyntaxStyleUtil.deletedBg(), "Left only  " + EntryStatus.LEFT_ONLY.label))
+                .add(chip(SyntaxStyleUtil.addedBg(),   "Right only  " + EntryStatus.RIGHT_ONLY.label))
+                .add(chip(null,                           "Identical"))
+                .build();
     }
 
     private static JLabel chip(Color bg, String text) {
-        JLabel l = new JLabel(" " + text + " ");
-        l.setOpaque(bg != null);
+        JLabel l = label(" " + text + " ")
+                .opaque(bg != null)
+                .font(font -> font.deriveFont(Font.PLAIN, 11f))
+                .border(BorderFactory.createLineBorder(Color.GRAY))
+                .build();
         if (bg != null) l.setBackground(bg);
-        l.setFont(l.getFont().deriveFont(Font.PLAIN, 11f));
-        l.setBorder(BorderFactory.createLineBorder(Color.GRAY));
         return l;
     }
 
