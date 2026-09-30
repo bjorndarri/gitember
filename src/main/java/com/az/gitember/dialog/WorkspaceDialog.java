@@ -6,6 +6,13 @@ import com.az.gitember.data.Settings;
 import com.az.gitember.data.Workspace;
 import com.az.gitember.service.Context;
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.model.CancelException;
+import is.codion.common.reactive.value.Value;
+import is.codion.swing.common.model.component.list.SwingFilterListModel;
+import is.codion.swing.common.ui.Utilities;
+import is.codion.swing.common.ui.component.list.FilterList;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.dialog.Dialogs;
 import org.kordamp.ikonli.fontawesome5.FontAwesomeSolid;
 
 import javax.swing.*;
@@ -17,6 +24,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.Consumer;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 /**
  * Create / edit and open a {@link Workspace}. A workspace has a name and a list of
@@ -33,9 +42,10 @@ public class WorkspaceDialog extends JDialog {
     /** Live settings instance being edited, or {@code null} when creating a workspace. */
     private final Workspace existingWorkspace;
     private final Workspace workspace;
+    private final Value<String> name = Value.nonNull("");
     public final JTextField nameField;
-    private final DefaultListModel<Project> projectModel = new DefaultListModel<>();
-    private final JList<Project> projectList = new JList<>(projectModel);
+    private final SwingFilterListModel<Project> projectModel = SwingFilterListModel.builder().<Project>items().build();
+    private final FilterList<Project> projectList;
 
     /** Invoked with the persisted workspace after a successful save (may be {@code null}). */
     private final Consumer<Workspace> onWorkspaceOpened;
@@ -60,11 +70,19 @@ public class WorkspaceDialog extends JDialog {
         this.onWorkspaceOpened = onWorkspaceOpened;
         this.workspace = loadWorkingCopy(existing);
 
-        nameField = new JTextField(24);
-        nameField.setName("workspaceNameField");
-        projectList.setName("workspaceProjectList");
-        projectList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        projectList.setCellRenderer(new ProjectCellRenderer());
+        nameField = stringField()
+                .columns(24)
+                .name("workspaceNameField")
+                .label("Name:")
+                .link(name)
+                .build();
+        projectList = FilterList.builder()
+                .model(projectModel)
+                .selectedItem()
+                .name("workspaceProjectList")
+                // a DefaultListCellRenderer, which cellRenderer(ListCellRenderer<Project>) does not accept
+                .onBuild(list -> list.setCellRenderer(new ProjectCellRenderer()))
+                .build();
 
         setLayout(new BorderLayout());
         add(buildTopPanel(), BorderLayout.NORTH);
@@ -74,88 +92,68 @@ public class WorkspaceDialog extends JDialog {
         loadIntoForm();
 
         // Keep the workspace name in sync as it is typed.
-        nameField.getDocument().addDocumentListener(new SimpleDocumentListener(this::applyNameEdit));
-
+        name.addListener(this::applyNameEdit);
     }
 
     // ── UI construction ────────────────────────────────────────────────────────
 
     private JPanel buildTopPanel() {
-        JPanel form = new JPanel(new GridBagLayout());
-        form.setBorder(BorderFactory.createEmptyBorder(15, 15, 5, 15));
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(5, 5, 5, 5);
-        gbc.anchor = GridBagConstraints.WEST;
-
-        gbc.gridx = 0; gbc.gridy = 0; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
-        form.add(new JLabel("Name:"), gbc);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        form.add(nameField, gbc);
-
-        return form;
+        return form()
+                .border(BorderFactory.createEmptyBorder(15, 15, 5, 15))
+                .add(nameField)
+                .build();
     }
 
     private JComponent buildCenterPanel() {
-        JPanel panel = new JPanel(new BorderLayout(8, 8));
-        panel.setBorder(BorderFactory.createEmptyBorder(0, 15, 5, 15));
-
-        JLabel title = new JLabel("Repositories");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, title.getFont().getSize() - 1f));
-        title.setForeground(UIManager.getColor("Label.disabledForeground"));
-
-        JScrollPane scroll = new JScrollPane(projectList);
-
         Dimension size = new Dimension(180, 36);
 
         JButton addExistingBtn = Util.createButton("Add existing…", "Add Existing Project…", FontAwesomeSolid.PLUS,0,size);
-                //new JButton("Add Existing Project…");
         addExistingBtn.setName("addExistingProjectButton");
         addExistingBtn.addActionListener(e -> addExistingProject());
 
         JButton addFromDiskBtn = Util.createButton("Add new…", "Add Repository from Disk…", FontAwesomeSolid.PLUS,0,size);
-        //new JButton("Add Repository from Disk…");
         addFromDiskBtn.setName("addRepositoryFromDiskButton");
         addFromDiskBtn.addActionListener(e -> addRepositoryFromDisk());
 
-
         JButton removeBtn = Util.createButton("Remove", null, FontAwesomeSolid.MINUS,0,size);
-        //new JButton("Remove");
         removeBtn.setName("removeProjectButton");
         removeBtn.addActionListener(e -> removeSelectedProject());
-        removeBtn.setEnabled(false);
-        projectList.addListSelectionListener(e ->
-                removeBtn.setEnabled(projectList.getSelectedValue() != null));
+        Utilities.enabled(projectModel.selection().present(), removeBtn);
 
-        JPanel btnBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        btnBar.add(addExistingBtn);
-        btnBar.add(addFromDiskBtn);
-        btnBar.add(removeBtn);
-
-        panel.add(title, BorderLayout.NORTH);
-        panel.add(scroll, BorderLayout.CENTER);
-        panel.add(btnBar, BorderLayout.SOUTH);
-        return panel;
+        return borderLayoutPanel()
+                .layout(new BorderLayout(8, 8))
+                .border(BorderFactory.createEmptyBorder(0, 15, 5, 15))
+                .north(label("Repositories")
+                        .font(font -> font.deriveFont(Font.BOLD, font.getSize() - 1f))
+                        .foreground(UIManager.getColor("Label.disabledForeground")))
+                .center(scrollPane()
+                        .view(projectList))
+                .south(panel()
+                        .layout(new FlowLayout(FlowLayout.LEFT, 6, 0))
+                        .add(addExistingBtn)
+                        .add(addFromDiskBtn)
+                        .add(removeBtn))
+                .build();
     }
 
     private JPanel buildButtonPanel() {
-        JButton confirmBtn;
-        if (existingWorkspace != null) {
-            confirmBtn = new JButton("Save");
-            confirmBtn.setName("saveWorkspaceButton");
-        } else {
-            confirmBtn = new JButton("Open");
-            confirmBtn.setName("openWorkspaceButton");
-        }
-        JButton cancelBtn = new JButton("Cancel");
-        cancelBtn.setName("cancelWorkspaceButton");
-        confirmBtn.addActionListener(e -> persistWorkspace());
-        cancelBtn.addActionListener(e -> dispose());
+        boolean editing = existingWorkspace != null;
+        JButton confirmBtn = button()
+                .control(Control.builder()
+                        .command(this::persistWorkspace)
+                        .caption(editing ? "Save" : "Open"))
+                .name(editing ? "saveWorkspaceButton" : "openWorkspaceButton")
+                .build();
         getRootPane().setDefaultButton(confirmBtn);
 
-        JPanel panel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        panel.add(confirmBtn);
-        panel.add(cancelBtn);
-        return panel;
+        return flowLayoutPanel(FlowLayout.RIGHT)
+                .add(confirmBtn)
+                .add(button()
+                        .control(Control.builder()
+                                .command(this::dispose)
+                                .caption("Cancel"))
+                        .name("cancelWorkspaceButton"))
+                .build();
     }
 
     // ── Model handling ───────────────────────────────────────────────────────────
@@ -173,13 +171,12 @@ public class WorkspaceDialog extends JDialog {
     }
 
     private void loadIntoForm() {
-        nameField.setText(workspace.getName() != null ? workspace.getName() : "");
-        projectModel.clear();
-        workspace.getProjects().forEach(projectModel::addElement);
+        name.set(workspace.getName() != null ? workspace.getName() : "");
+        projectModel.items().set(workspace.getProjects());
     }
 
     private void applyNameEdit() {
-        workspace.setName(nameField.getText().trim());
+        workspace.setName(name.get().trim());
     }
 
     // ── Project actions ────────────────────────────────────────────────────────
@@ -211,13 +208,16 @@ public class WorkspaceDialog extends JDialog {
     }
 
     private void addRepositoryFromDisk() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle("Select Git Repository");
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+        File folder;
+        try {
+            folder = Dialogs.select()
+                    .files()
+                    .owner(this)
+                    .title("Select Git Repository")
+                    .selectDirectory();
+        } catch (CancelException e) {
             return;
         }
-        File folder = chooser.getSelectedFile();
         if (!new File(folder, Const.GIT_FOLDER).exists()) {
             JOptionPane.showMessageDialog(this,
                     "The selected folder is not a git repository (no " + Const.GIT_FOLDER + " folder found).",
@@ -231,11 +231,11 @@ public class WorkspaceDialog extends JDialog {
             return;
         }
         loadIntoForm();
-        projectList.setSelectedValue(project, true);
+        projectModel.selection().item().set(project);
     }
 
     private void removeSelectedProject() {
-        Project selected = projectList.getSelectedValue();
+        Project selected = projectModel.selection().item().get();
         if (selected == null) {
             return;
         }
@@ -315,18 +315,5 @@ public class WorkspaceDialog extends JDialog {
             }
             return this;
         }
-    }
-
-    /** Minimal {@link javax.swing.event.DocumentListener} that runs one action on any change. */
-    private static class SimpleDocumentListener implements javax.swing.event.DocumentListener {
-        private final Runnable action;
-
-        SimpleDocumentListener(Runnable action) {
-            this.action = action;
-        }
-
-        @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { action.run(); }
-        @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { action.run(); }
-        @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { action.run(); }
     }
 }
