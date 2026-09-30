@@ -131,7 +131,7 @@ public class StatDialog extends JFrame {
                                 .view(table)
                                 .border(BorderFactory.createTitledBorder("Summary")))
                         .resizeWeight(0.50)
-                        .onBuild(split -> split.setDividerLocation(420)))
+                        .dividerLocation(420))
                 // bar chart above full-width progress bar
                 .south(borderLayoutPanel()
                         .layout(new BorderLayout(0, 2))

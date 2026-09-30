@@ -242,9 +242,8 @@ public class BranchDiffWindow extends JFrame {
                 .rightComponent(aiPanel)
                 .resizeWeight(0.65)
                 .dividerSize(5)
+                .dividerLocation(Integer.MAX_VALUE)  // hide until shown
                 .build();
-
-        mainSplit.setDividerLocation(Integer.MAX_VALUE);  // hide until shown
 
         return mainSplit;
     }
