@@ -2,6 +2,14 @@ package com.az.gitember.ui;
 
 import com.az.gitember.service.Context;
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.model.CancelException;
+import is.codion.common.model.worker.ProgressWorker;
+import is.codion.common.reactive.state.State;
+import is.codion.swing.common.ui.Utilities;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.control.Controls;
+import is.codion.swing.common.ui.dialog.Dialogs;
+import is.codion.swing.common.ui.key.KeyEvents;
 import org.apache.commons.lang3.StringUtils;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
 import org.fife.ui.rtextarea.RTextScrollPane;
@@ -21,6 +29,9 @@ import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import static is.codion.swing.common.ui.component.Components.*;
+import static is.codion.swing.common.ui.key.KeyEvents.MENU_SHORTCUT_MASK;
+
 /**
  * Window to display (and optionally edit) text file content.
  * Supports optional git-blame annotation via the "Annotate" toggle button.
@@ -35,11 +46,14 @@ public class FileViewerWindow extends JFrame {
     private final SearchBar searchBar;
 
     // Blame components
-    private final JToggleButton annotateBtn = new JToggleButton("Annotate");
+    private final State annotated    = State.state();
+    private final State blameLoading = State.state();
+    private final State blameShaClicked = State.state();
+    private final JToggleButton annotateBtn;
     private final JButton saveBtn;
-    private final JTextArea blameTextArea   = new JTextArea();
+    private final JTextArea blameTextArea;
     private final JScrollPane blameScrollPane;
-    private final JPanel centerPanel        = new JPanel(new BorderLayout());
+    private final JPanel centerPanel;
 
     private String  blameCommitSha  = null;
     private String  blameFilePath   = null;
@@ -83,33 +97,36 @@ public class FileViewerWindow extends JFrame {
         scrollPane.setFoldIndicatorEnabled(false);
 
         // ── Blame sidebar ─────────────────────────────────────────────────
-        blameTextArea.setEditable(false);
-        blameTextArea.setFont(SyntaxStyleUtil.monoFont());
-        blameTextArea.setFocusable(false);
-        blameTextArea.setLineWrap(false);
-        blameTextArea.setBorder(BorderFactory.createEmptyBorder(0, 4, 0, 8));
-
         boolean dark = SyntaxStyleUtil.isDarkTheme();
-        blameTextArea.setBackground(dark ? new Color(35, 35, 40)  : new Color(240, 240, 245));
-        blameTextArea.setForeground(dark ? new Color(160, 170, 180) : new Color(80,  80,  90));
+        blameTextArea = textArea()
+                .editable(false)
+                .font(SyntaxStyleUtil.monoFont())
+                .focusable(false)
+                .lineWrap(false)
+                .border(BorderFactory.createEmptyBorder(0, 4, 0, 8))
+                .background(dark ? new Color(35, 35, 40)  : new Color(240, 240, 245))
+                .foreground(dark ? new Color(160, 170, 180) : new Color(80,  80,  90))
+                .build();
 
-        blameScrollPane = new JScrollPane(blameTextArea,
-                JScrollPane.VERTICAL_SCROLLBAR_NEVER,
-                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        blameScrollPane.setBorder(BorderFactory.createMatteBorder(
-                0, 0, 0, 1,
-                dark ? new Color(70, 70, 80) : new Color(200, 200, 210)));
-        blameScrollPane.setVisible(false);
+        blameScrollPane = scrollPane()
+                .view(blameTextArea)
+                .verticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER)
+                .horizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER)
+                .border(BorderFactory.createMatteBorder(
+                        0, 0, 0, 1,
+                        dark ? new Color(70, 70, 80) : new Color(200, 200, 210)))
+                .visible(false)
+                .build();
 
         // ── Blame context menu & mouse interactions ───────────────────────
-        JPopupMenu blameContextMenu = new JPopupMenu();
-        JMenuItem openInHistoryItem = new JMenuItem("Open commit in History");
-        openInHistoryItem.addActionListener(e -> {
-            if (lastBlameClickSha != null && !lastBlameClickSha.isBlank()) {
-                navigateToHistoryCommit(lastBlameClickSha);
-            }
-        });
-        blameContextMenu.add(openInHistoryItem);
+        // the menu acts on the line clicked, so it is shown from the mouse listener
+        JPopupMenu blameContextMenu = menu()
+                .controls(Controls.builder()
+                        .control(Control.builder()
+                                .command(() -> navigateToHistoryCommit(lastBlameClickSha))
+                                .caption("Open commit in History")
+                                .enabled(blameShaClicked)))
+                .buildPopupMenu();
 
         blameTextArea.addMouseListener(new MouseAdapter() {
             @Override
@@ -128,7 +145,7 @@ public class FileViewerWindow extends JFrame {
             private void maybeShowBlameMenu(MouseEvent e) {
                 if (!e.isPopupTrigger()) return;
                 lastBlameClickSha = extractShaFromBlamePoint(e.getPoint());
-                openInHistoryItem.setEnabled(lastBlameClickSha != null && !lastBlameClickSha.isBlank());
+                blameShaClicked.set(lastBlameClickSha != null && !lastBlameClickSha.isBlank());
                 blameContextMenu.show(blameTextArea, e.getX(), e.getY());
             }
         });
@@ -155,37 +172,45 @@ public class FileViewerWindow extends JFrame {
 
 
         // ── Buttons ───────────────────────────────────────────────────────
-        saveBtn = new JButton("Save...");
-        saveBtn.setName("saveFileButton");
-        saveBtn.addActionListener(e -> saveContent());
+        saveBtn = button()
+                .control(Control.builder()
+                        .command(this::saveContent)
+                        .caption("Save..."))
+                .name("saveFileButton")
+                .build();
 
-        JButton closeBtn = new JButton("Close");
-        closeBtn.setName("closeFileButton");
-        closeBtn.addActionListener(e -> {
-            if (editPath != null) {
-                confirmCloseIfDirty();
-            } else {
-                dispose();
-            }
-        });
+        JButton closeBtn = button()
+                .control(Control.builder()
+                        .command(this::close)
+                        .caption("Close"))
+                .name("closeFileButton")
+                .build();
 
-        annotateBtn.setVisible(false);   // shown only when enableBlame() is called
-        annotateBtn.addActionListener(e -> toggleAnnotation());
+        annotateBtn = toggleButton()
+                .text("Annotate")
+                .link(annotated)
+                .visible(false)   // shown only when enableBlame() is called
+                .build();
+        Utilities.enabled(blameLoading.not(), annotateBtn);
+        annotated.addListener(this::toggleAnnotation);
 
-        JPanel leftBtns  = new JPanel(new FlowLayout(FlowLayout.LEFT,  8, 6));
-        leftBtns.add(annotateBtn);
-
-        JPanel rightBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
-        rightBtns.add(saveBtn);
-        rightBtns.add(closeBtn);
-
-        JPanel btnPanel = new JPanel(new BorderLayout());
-        btnPanel.add(leftBtns,  BorderLayout.WEST);
-        btnPanel.add(rightBtns, BorderLayout.EAST);
+        JPanel btnPanel = borderLayoutPanel()
+                .layout(new BorderLayout())
+                .west(panel()
+                        .layout(new FlowLayout(FlowLayout.LEFT,  8, 6))
+                        .add(annotateBtn))
+                .east(panel()
+                        .layout(new FlowLayout(FlowLayout.RIGHT, 8, 6))
+                        .add(saveBtn)
+                        .add(closeBtn))
+                .build();
 
         // ── Layout ────────────────────────────────────────────────────────
-        centerPanel.add(blameScrollPane, BorderLayout.WEST);
-        centerPanel.add(scrollPane,      BorderLayout.CENTER);
+        centerPanel = borderLayoutPanel()
+                .layout(new BorderLayout())
+                .west(blameScrollPane)
+                .center(scrollPane)
+                .build();
 
         getContentPane().setLayout(new BorderLayout());
         getContentPane().add(searchBar,   BorderLayout.NORTH);
@@ -195,10 +220,12 @@ public class FileViewerWindow extends JFrame {
         getRootPane().setDefaultButton(closeBtn);
 
         // Ctrl/Cmd+F → open search bar
-        KeyStroke ctrlF = KeyStroke.getKeyStroke(KeyEvent.VK_F,
-                java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx());
-        getRootPane().registerKeyboardAction(
-                e -> searchBar.activate(), ctrlF, JComponent.WHEN_IN_FOCUSED_WINDOW);
+        KeyEvents.builder()
+                .keyCode(KeyEvent.VK_F)
+                .modifiers(MENU_SHORTCUT_MASK)
+                .condition(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .action(Control.command(searchBar::activate))
+                .enable(getRootPane());
 
         Util.bindEscapeToDispose(this);
 
@@ -262,17 +289,15 @@ public class FileViewerWindow extends JFrame {
         textArea.setHighlightCurrentLine(true);
         saveBtn.setText("Save");
 
-        KeyStroke saveStroke = KeyStroke.getKeyStroke(KeyEvent.VK_S,
-                Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx());
-        getRootPane().registerKeyboardAction(
-                e -> saveContent(), saveStroke, JComponent.WHEN_IN_FOCUSED_WINDOW);
+        KeyEvents.builder()
+                .keyCode(KeyEvent.VK_S)
+                .modifiers(MENU_SHORTCUT_MASK)
+                .condition(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .action(Control.command(this::saveContent))
+                .enable(getRootPane());
 
-        getRootPane().getActionMap().put("ESCAPE", new AbstractAction() {
-            @Override
-            public void actionPerformed(java.awt.event.ActionEvent e) {
-                confirmCloseIfDirty();
-            }
-        });
+        // replaces the dispose action bound to Escape by Util.bindEscapeToDispose
+        getRootPane().getActionMap().put("ESCAPE", Control.command(this::confirmCloseIfDirty));
 
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         addWindowListener(new java.awt.event.WindowAdapter() {
@@ -303,7 +328,7 @@ public class FileViewerWindow extends JFrame {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private void toggleAnnotation() {
-        if (!annotateBtn.isSelected()) {
+        if (!annotated.is()) {
             blameScrollPane.setVisible(false);
             centerPanel.revalidate();
             return;
@@ -315,20 +340,17 @@ public class FileViewerWindow extends JFrame {
             return;
         }
 
-        annotateBtn.setEnabled(false);
+        blameLoading.set(true);
         annotateBtn.setText("Loading…");
 
-        new SwingWorker<List<String>, Void>() {
-            @Override
-            protected List<String> doInBackground() {
-                return Context.getGitRepoService()
-                        .getBlameAnnotations(blameCommitSha, blameFilePath);
-            }
-
-            @Override
-            protected void done() {
-                try {
-                    List<String> annotations = get();
+        ProgressWorker.builder()
+                .task(() -> Context.getGitRepoService()
+                        .getBlameAnnotations(blameCommitSha, blameFilePath))
+                .onDone(() -> {
+                    blameLoading.set(false);
+                    annotateBtn.setText("Annotate");
+                })
+                .onResult(annotations -> {
                     blameTextArea.setText(String.join("\n", annotations));
                     blameTextArea.setCaretPosition(0);
 
@@ -344,18 +366,15 @@ public class FileViewerWindow extends JFrame {
                     blameLoaded = true;
                     blameScrollPane.setVisible(true);
                     centerPanel.revalidate();
-                } catch (Exception ex) {
+                })
+                .onException(ex -> {
                     log.log(Level.WARNING, "Blame load failed", ex);
-                    annotateBtn.setSelected(false);
-                    JOptionPane.showMessageDialog(FileViewerWindow.this,
-                            "Blame unavailable: " + ex.getMessage(),
+                    annotated.set(false);
+                    JOptionPane.showMessageDialog(this,
+                            "Blame unavailable: " + ex.toString(),
                             "Annotate", JOptionPane.WARNING_MESSAGE);
-                } finally {
-                    annotateBtn.setEnabled(true);
-                    annotateBtn.setText("Annotate");
-                }
-            }
-        }.execute();
+                })
+                .execute();
     }
 
     /** Extracts the 7-char commit SHA from the annotation line under the given point. */
@@ -381,6 +400,14 @@ public class FileViewerWindow extends JFrame {
         if (mf instanceof MainFrame mainFrame) {
             mainFrame.toFront();
             mainFrame.showCommitInHistory(sha);
+        }
+    }
+
+    private void close() {
+        if (editPath != null) {
+            confirmCloseIfDirty();
+        } else {
+            dispose();
         }
     }
 
@@ -424,23 +451,23 @@ public class FileViewerWindow extends JFrame {
                         "Error", JOptionPane.ERROR_MESSAGE);
             }
         } else {
-            JFileChooser chooser = new JFileChooser();
-            chooser.setDialogTitle("Save as");
-            chooser.setSelectedFile(new File(suggestedFileName));
-            chooser.setFileFilter(new FileNameExtensionFilter(
-                    "Patch / Diff files (*.patch, *.diff)", "patch", "diff"));
-            chooser.setAcceptAllFileFilterUsed(true);
-
-            if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
-                try {
-                    Files.writeString(chooser.getSelectedFile().toPath(),
-                            textArea.getText(), StandardCharsets.UTF_8);
-                    saved = true;
-                } catch (IOException ex) {
-                    JOptionPane.showMessageDialog(this,
-                            "Cannot save file:\n" + ex.getMessage(),
-                            "Error", JOptionPane.ERROR_MESSAGE);
-                }
+            try {
+                File file = Dialogs.select()
+                        .files()
+                        .owner(this)
+                        .title("Save as")
+                        .filter(new FileNameExtensionFilter(
+                                "Patch / Diff files (*.patch, *.diff)", "patch", "diff"))
+                        .confirmOverwrite(false)
+                        .selectFileToSave(suggestedFileName);
+                Files.writeString(file.toPath(), textArea.getText(), StandardCharsets.UTF_8);
+                saved = true;
+            } catch (CancelException ex) {
+                // cancelled
+            } catch (IOException ex) {
+                JOptionPane.showMessageDialog(this,
+                        "Cannot save file:\n" + ex.getMessage(),
+                        "Error", JOptionPane.ERROR_MESSAGE);
             }
         }
         return saved;
