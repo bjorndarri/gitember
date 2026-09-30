@@ -7,21 +7,30 @@ import com.az.gitember.ui.MainFrame;
 import com.az.gitember.ui.StatusBar;
 import com.az.gitember.ui.stat.MonthlyBarChartPanel;
 import com.az.gitember.ui.stat.PieChartPanel;
+import is.codion.common.model.component.table.FilterTableModel.TableColumns;
+import is.codion.common.model.worker.ProgressWorker;
+import is.codion.common.model.worker.ProgressWorker.ProgressReporter;
+import is.codion.common.reactive.state.State;
+import is.codion.common.reactive.value.Value;
+import is.codion.swing.common.model.component.table.SwingFilterTableModel;
+import is.codion.swing.common.ui.component.table.FilterTable;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.key.KeyEvents;
 import org.apache.commons.collections4.CollectionUtils;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.revplot.PlotCommit;
 import org.eclipse.jgit.revplot.PlotLane;
 
 import javax.swing.*;
-import javax.swing.table.AbstractTableModel;
 import java.awt.*;
-import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.util.*;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 /**
  * Statistics window (JFrame – maximizable).
@@ -38,17 +47,17 @@ public class StatDialog extends JFrame {
 
     private static final Logger log = Logger.getLogger(StatDialog.class.getName());
 
-    private final JSpinner depthSpinner;
-    private final JButton computeBtn;
+    private final Value<Integer> depth = Value.nonNull(12);
+    private final State computing = State.state();
+
     private final JProgressBar progressBar;   // month-level progress inside the dialog
 
     private final PieChartPanel pieChart;
-    private final StatTableModel tableModel;
-    private final JTable table;
+    private final FilterTable<StatRow, String> table;
     private final MonthlyBarChartPanel barChart;
 
     private final StatusBar statusBar;
-    private SwingWorker<List<ScmStat>, String> worker;
+    private ProgressWorker<List<ScmStat>, Progress> worker;
 
     public StatDialog(Frame owner) {
         super("Statistics");
@@ -58,8 +67,7 @@ public class StatDialog extends JFrame {
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
-                cancelWorker();
-                dispose();
+                close();
             }
         });
         setSize(900, 680);
@@ -68,78 +76,83 @@ public class StatDialog extends JFrame {
         setResizable(true);
 
         // ── Control bar (no Close button – use window X) ─────────────────────
-        depthSpinner = new JSpinner(new SpinnerNumberModel(12, 1, 120, 1));
-        depthSpinner.setPreferredSize(new Dimension(70, depthSpinner.getPreferredSize().height));
+        JPanel controlBar = panel()
+                .layout(new FlowLayout(FlowLayout.LEFT, 8, 6))
+                .add(label("Depth:"))
+                .add(integerSpinner()
+                        .range(1, 120)
+                        .stepSize(1)
+                        .link(depth)
+                        .preferredWidth(70))
+                .add(label("months"))
+                .add(button()
+                        .control(Control.builder()
+                                .command(this::startCompute)
+                                .caption("Compute")
+                                .enabled(computing.not())))
+                .build();
 
-        computeBtn = new JButton("Compute");
-        computeBtn.addActionListener(e -> {
-            try {
-                startCompute();
-            } catch (Exception ex) {
-                throw new RuntimeException(ex);
-            }
-        });
-
-        progressBar = new JProgressBar(0, 100);
-        progressBar.setStringPainted(true);
-        progressBar.setString("");
-
-        JPanel controlBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 6));
-        controlBar.add(new JLabel("Depth:"));
-        controlBar.add(depthSpinner);
-        controlBar.add(new JLabel("months"));
-        controlBar.add(computeBtn);
+        // determinate, with a border, as a JProgressBar is by default
+        progressBar = progressBar()
+                .indeterminate(false)
+                .borderPainted(true)
+                .stringPainted(true)
+                .string("")
+                .build();
 
         // ── Pie chart ────────────────────────────────────────────────────────
         pieChart = new PieChartPanel();
         pieChart.setBorder(BorderFactory.createTitledBorder("Codebase Ownership (HEAD)"));
 
         // ── Summary table ────────────────────────────────────────────────────
-        tableModel = new StatTableModel();
-        table = new JTable(tableModel);
-        table.setFillsViewportHeight(true);
-        table.setAutoCreateRowSorter(true);
-        table.getTableHeader().setReorderingAllowed(false);
-        JScrollPane tableScroll = new JScrollPane(table);
-        tableScroll.setBorder(BorderFactory.createTitledBorder("Summary"));
-
-        // ── Split pane ───────────────────────────────────────────────────────
-        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, pieChart, tableScroll);
-        splitPane.setDividerLocation(420);
-        splitPane.setResizeWeight(0.50);
+        table = FilterTable.builder()
+                .model(SwingFilterTableModel.<StatRow, String>builder()
+                        .columns(new StatColumns())
+                        .build())
+                .fillsViewportHeight(true)
+                .columnReordering(false)
+                .autoResizeMode(JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS)
+                .build();
 
         // ── Monthly bar chart ─────────────────────────────────────────────────
         barChart = new MonthlyBarChartPanel();
         barChart.setBorder(BorderFactory.createTitledBorder("Monthly Contributions"));
         barChart.setPreferredSize(new Dimension(800, 220));
 
-        // ── South: bar chart above full-width progress bar ────────────────────
-        JPanel southPanel = new JPanel(new BorderLayout(0, 2));
-        southPanel.add(barChart, BorderLayout.CENTER);
-        southPanel.add(progressBar, BorderLayout.SOUTH);
-
         // ── Layout ────────────────────────────────────────────────────────────
-        JPanel content = new JPanel(new BorderLayout(0, 4));
-        content.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
-        content.add(controlBar, BorderLayout.NORTH);
-        content.add(splitPane, BorderLayout.CENTER);
-        content.add(southPanel, BorderLayout.SOUTH);
-        getContentPane().add(content);
+        getContentPane().add(borderLayoutPanel()
+                .layout(new BorderLayout(0, 4))
+                .border(BorderFactory.createEmptyBorder(4, 4, 4, 4))
+                .north(controlBar)
+                .center(splitPane()
+                        .orientation(JSplitPane.HORIZONTAL_SPLIT)
+                        .leftComponent(pieChart)
+                        .rightComponent(scrollPane()
+                                .view(table)
+                                .border(BorderFactory.createTitledBorder("Summary")))
+                        .resizeWeight(0.50)
+                        .onBuild(split -> split.setDividerLocation(420)))
+                // bar chart above full-width progress bar
+                .south(borderLayoutPanel()
+                        .layout(new BorderLayout(0, 2))
+                        .center(barChart)
+                        .south(progressBar))
+                .build());
 
+        KeyEvents.builder()
+                .keyCode(KeyEvent.VK_ESCAPE)
+                .condition(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .action(Control.command(this::close))
+                .enable(getRootPane());
+    }
 
-        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
-                .put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "ESCAPE");
-        getRootPane().getActionMap().put("ESCAPE", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                cancelWorker();
-                dispose();
-            }
-        });
+    private void close() {
+        cancelWorker();
+        dispose();
     }
 
     private void cancelWorker() {
-        if (worker != null && !worker.isDone()) worker.cancel(true);
+        if (worker != null && !worker.done()) worker.cancel(true);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -166,107 +179,95 @@ public class StatDialog extends JFrame {
                     ep,
                     "Uncommited changes", JOptionPane.WARNING_MESSAGE);
         } else {
-
-
-            int depth = (int) depthSpinner.getValue();
-            computeBtn.setEnabled(false);
+            int months = depth.get();
+            computing.set(true);
             progressBar.setValue(0);
-            progressBar.setString("0 / " + depth);
+            progressBar.setString("0 / " + months);
             statusBar.setStatus("Computing statistics…");
             statusBar.showProgress(true);
 
-            worker = new SwingWorker<>() {
-
-                @Override
-                protected List<ScmStat> doInBackground() throws Exception {
-                    @SuppressWarnings("unchecked")
-                    List<PlotCommit<PlotLane>> monthly =
-                            Context.getGitRepoService().getLastCommitPerMonth(depth, Context.getPlotCommitList());
-
-                    if (monthly.isEmpty()) {
-                        publish("No commits found.");
-                        return Collections.emptyList();
-                    }
-
-                    int total = monthly.size();
-
-                    ProgressMonitor monitor = new ProgressMonitor() {
-                        @Override
-                        public void start(int n) {
-                        }
-
-                        @Override
-                        public void beginTask(String t, int n) {
-                        }
-
-                        @Override
-                        public void update(int n) {
-                        }
-
-                        @Override
-                        public void endTask() {
-                        }
-
-                        @Override
-                        public boolean isCancelled() {
-                            return Thread.currentThread().isInterrupted();
-                        }
-
-                        @Override
-                        public void showDuration(boolean e) {
-                        }
-                    };
-
-                    List<ScmStat> stats = new ArrayList<>();
-                    for (int i = 0; i < monthly.size(); i++) {
-                        if (isCancelled()) break;
-                        List<PlotCommit<PlotLane>> single = Collections.singletonList(monthly.get(i));
-                        stats.addAll(Context.getGitRepoService().blameList(single, monitor));
-
-                        final int idx = i + 1;
-                        SwingUtilities.invokeLater(() -> {
-                            progressBar.setMaximum(total);
-                            progressBar.setValue(idx);
-                            progressBar.setString(idx + " / " + total);
-                        });
-                        publish(idx + " / " + total + " months…");
-                    }
-                    return stats;
-                }
-
-                @Override
-                protected void process(List<String> chunks) {
-                    if (!chunks.isEmpty())
-                        statusBar.setStatus("Statistics: " + chunks.get(chunks.size() - 1));
-                }
-
-                @Override
-                protected void done() {
-                    computeBtn.setEnabled(true);
-                    try {
-                        List<ScmStat> stats = get();
+            worker = ProgressWorker.builder()
+                    .task((ProgressReporter<Progress> reporter) -> computeStats(months, reporter))
+                    .onPublish(chunks -> showProgress(chunks.get(chunks.size() - 1)))
+                    .onDone(() -> computing.set(false))
+                    .onResult(stats -> {
                         applyResults(stats);
-                        progressBar.setString("Done");
-                        statusBar.setStatus("Statistics: complete.");
-                    } catch (java.util.concurrent.CancellationException ex) {
-                        progressBar.setString("Cancelled");
-                        statusBar.setStatus("Statistics: cancelled.");
-                    } catch (Exception ex) {
+                        finished("Done", "Statistics: complete.");
+                    })
+                    .onCancelled(() -> finished("Cancelled", "Statistics: cancelled."))
+                    .onException(ex -> {
                         log.log(Level.WARNING, "Statistics computation failed", ex);
-                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                        progressBar.setString("Error");
-                        statusBar.setStatus("Statistics error: " + cause.getMessage());
-                    } finally {
-                        statusBar.clearProgress();
-                    }
-                }
-            };
-            worker.execute();
-
-
-
-
+                        finished("Error", "Statistics error: " + ex.getMessage());
+                    })
+                    .execute();
         }
+    }
+
+    private List<ScmStat> computeStats(int months, ProgressReporter<Progress> reporter) throws Exception {
+        @SuppressWarnings("unchecked")
+        List<PlotCommit<PlotLane>> monthly =
+                Context.getGitRepoService().getLastCommitPerMonth(months, Context.getPlotCommitList());
+
+        if (monthly.isEmpty()) {
+            reporter.publish(new Progress("No commits found.", 0, 0));
+            return Collections.emptyList();
+        }
+
+        int total = monthly.size();
+
+        ProgressMonitor monitor = new ProgressMonitor() {
+            @Override
+            public void start(int n) {
+            }
+
+            @Override
+            public void beginTask(String t, int n) {
+            }
+
+            @Override
+            public void update(int n) {
+            }
+
+            @Override
+            public void endTask() {
+            }
+
+            @Override
+            public boolean isCancelled() {
+                return Thread.currentThread().isInterrupted();
+            }
+
+            @Override
+            public void showDuration(boolean e) {
+            }
+        };
+
+        List<ScmStat> stats = new ArrayList<>();
+        for (int i = 0; i < monthly.size(); i++) {
+            if (Thread.currentThread().isInterrupted()) break;
+            List<PlotCommit<PlotLane>> single = Collections.singletonList(monthly.get(i));
+            stats.addAll(Context.getGitRepoService().blameList(single, monitor));
+
+            int idx = i + 1;
+            reporter.publish(new Progress(idx + " / " + total + " months…", idx, total));
+        }
+        return stats;
+    }
+
+    private void showProgress(Progress progress) {
+        if (progress.months() > 0) {
+            progressBar.setMaximum(progress.months());
+            progressBar.setValue(progress.month());
+            progressBar.setString(progress.month() + " / " + progress.months());
+        }
+        statusBar.setStatus("Statistics: " + progress.status());
+    }
+
+    // after the outcome, since clearProgress() resets the status
+    private void finished(String progress, String status) {
+        progressBar.setString(progress);
+        statusBar.setStatus(status);
+        statusBar.clearProgress();
     }
 
     private void applyResults(List<ScmStat> stats) {
@@ -284,51 +285,56 @@ public class StatDialog extends JFrame {
         for (Map.Entry<String, Integer> e : sorted) lines.put(e.getKey(), e.getValue());
         pieChart.setData(lines, colors);
 
-        tableModel.setData(headStat, authors);
+        table.model().items().set(rows(headStat, authors));
         barChart.setData(stats, authors, colors);
+    }
+
+    private static List<StatRow> rows(ScmStat stat, List<String> authors) {
+        List<StatRow> rows = new ArrayList<>();
+        for (String author : authors) {
+            int lines = stat.getTotalLines().getOrDefault(author, 0);
+            int commits = stat.getLogMap().getOrDefault(author, 0);
+            int avg = commits > 0 ? lines / commits : 0;
+            rows.add(new StatRow(author, commits, lines, avg));
+        }
+        return rows;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static final class StatTableModel extends AbstractTableModel {
+    /** The status to show, and the months done of the total, if any */
+    private record Progress(String status, int month, int months) {}
 
-        private static final String[] COLS = {"Developer", "Commits", "Lines", "Avg Lines/Commit"};
-        private List<Object[]> rows = Collections.emptyList();
+    private record StatRow(String developer, int commits, int lines, int average) {}
 
-        void setData(ScmStat stat, List<String> authors) {
-            rows = new ArrayList<>();
-            for (String author : authors) {
-                int lines = stat.getTotalLines().getOrDefault(author, 0);
-                int commits = stat.getLogMap().getOrDefault(author, 0);
-                int avg = commits > 0 ? lines / commits : 0;
-                rows.add(new Object[]{author, commits, lines, avg});
-            }
-            fireTableDataChanged();
+    private static final class StatColumns implements TableColumns<StatRow, String> {
+
+        private static final String DEVELOPER = "Developer";
+        private static final String COMMITS = "Commits";
+        private static final String LINES = "Lines";
+        private static final String AVERAGE = "Avg Lines/Commit";
+
+        private static final List<String> IDENTIFIERS = List.of(DEVELOPER, COMMITS, LINES, AVERAGE);
+
+        @Override
+        public List<String> identifiers() {
+            return IDENTIFIERS;
         }
 
         @Override
-        public int getRowCount() {
-            return rows.size();
+        public Class<?> type(String identifier) {
+            return identifier.equals(DEVELOPER) ? String.class : Integer.class;
         }
 
         @Override
-        public int getColumnCount() {
-            return COLS.length;
-        }
-
-        @Override
-        public String getColumnName(int col) {
-            return COLS[col];
-        }
-
-        @Override
-        public Class<?> getColumnClass(int col) {
-            return col == 0 ? String.class : Integer.class;
-        }
-
-        @Override
-        public Object getValueAt(int row, int col) {
-            return rows.get(row)[col];
+        public Object value(StatRow row, String identifier) {
+            return switch (identifier) {
+                case DEVELOPER -> row.developer();
+                case COMMITS -> row.commits();
+                case LINES -> row.lines();
+                case AVERAGE -> row.average();
+                default -> throw new IllegalArgumentException(identifier);
+            };
         }
     }
 }
