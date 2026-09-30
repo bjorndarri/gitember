@@ -8,17 +8,23 @@ import com.az.gitember.handler.RemoveSubmoduleHandler;
 import com.az.gitember.handler.UpdateSubmodulesHandler;
 import com.az.gitember.service.Context;
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.model.component.table.FilterTableModel.TableColumns;
+import is.codion.common.model.worker.ProgressWorker;
+import is.codion.common.reactive.state.ObservableState;
+import is.codion.swing.common.model.component.table.SwingFilterTableModel;
+import is.codion.swing.common.ui.component.table.FilterTable;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.control.Controls;
 import org.kordamp.ikonli.fontawesome5.FontAwesomeSolid;
 
 import javax.swing.*;
-import javax.swing.table.AbstractTableModel;
-import javax.swing.table.DefaultTableCellRenderer;
 import java.awt.*;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
 import java.io.File;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Supplier;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 /**
  * Panel that shows all Git submodules with their status,
@@ -26,13 +32,19 @@ import java.util.List;
  */
 public class SubmodulePanel extends JPanel {
 
+    private static final String PATH      = "Path";
+    private static final String STATUS    = "Status";
+    private static final String INDEX_SHA = "Index SHA";
+    private static final String HEAD_SHA  = "HEAD SHA";
+    private static final String URL       = "URL";
+
     private final StatusBar statusBar;
-    private final JTable table;
-    private final SubmoduleTableModel tableModel;
+    private final SwingFilterTableModel<Submodule, String> model = SwingFilterTableModel.builder()
+            .columns(new SubmoduleColumns())
+            .build();
 
     public SubmodulePanel(StatusBar statusBar) {
-        this.statusBar  = statusBar;
-        this.tableModel = new SubmoduleTableModel();
+        this.statusBar = statusBar;
 
         setLayout(new BorderLayout(0, 6));
         setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
@@ -69,52 +81,39 @@ public class SubmodulePanel extends JPanel {
         toolbar.add(refreshBtn);
 
         // ── Table ─────────────────────────────────────────────────────────────
-        table = new JTable(tableModel);
-        table.setRowHeight(22);
-        table.setFillsViewportHeight(true);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        table.getTableHeader().setReorderingAllowed(false);
-
-        // Column widths
-        table.getColumnModel().getColumn(0).setPreferredWidth(180);  // Path
-        table.getColumnModel().getColumn(1).setPreferredWidth(80);   // Status
-        table.getColumnModel().getColumn(2).setPreferredWidth(90);   // Index SHA
-        table.getColumnModel().getColumn(3).setPreferredWidth(90);   // HEAD SHA
-        table.getColumnModel().getColumn(4).setPreferredWidth(320);  // URL
-
-        // Colour the Status column by status value
-        table.getColumnModel().getColumn(1).setCellRenderer(new StatusCellRenderer());
-
-        table.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mousePressed(MouseEvent e) {
-                if (e.isPopupTrigger()) {
-                    showRowMenu(e);
-                }
-            }
-
-            @Override
-            public void mouseReleased(MouseEvent e) {
-                if (e.isPopupTrigger()) {
-                    showRowMenu(e);
-                }
-            }
-
-            @Override
-            public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
-                    openSelectedSubmodule();
-                }
-            }
-        });
+        ObservableState selected = model.selection().present();
+        FilterTable<Submodule, String> table = FilterTable.builder()
+                .model(model)
+                .columns(column -> column.preferredWidth(switch (column.identifier()) {
+                    case PATH -> 180;
+                    case STATUS -> 80;
+                    case INDEX_SHA, HEAD_SHA -> 90;
+                    default -> 320;
+                }))
+                // Colour the Status column by status value
+                .cellRenderer(STATUS, Submodule.Status.class, renderer -> renderer
+                        .formatter(SubmodulePanel::statusLabel)
+                        .foreground((t, submodule, identifier, status) -> statusColor(status)))
+                .rowHeight(22)
+                .selectionMode(ListSelectionModel.SINGLE_SELECTION)
+                .autoResizeMode(JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS)
+                .columnReordering(false)
+                .sortable(false)
+                .popupControls(t -> submoduleControls(this, model.selection().item()::get, selected))
+                .doubleClick(Control.builder()
+                        .command(this::openSelectedSubmodule)
+                        .build())
+                .build();
 
         add(toolbar, BorderLayout.NORTH);
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        add(scrollPane()
+                .view(table)
+                .build(), BorderLayout.CENTER);
     }
 
     /** Called from Context PROP_SUBMODULES listener to refresh the table. */
     public void setSubmodules(List<Submodule> submodules) {
-        tableModel.setSubmodules(submodules);
+        model.items().set(submodules != null ? submodules : Collections.emptyList());
     }
 
     /** Public entry point so the menu item in MainFrame can trigger sync without selecting the panel first. */
@@ -122,66 +121,61 @@ public class SubmodulePanel extends JPanel {
         syncSubmodules();
     }
 
-    private void showRowMenu(MouseEvent e) {
-        int row = table.rowAtPoint(e.getPoint());
-        if (row >= 0) {
-            table.setRowSelectionInterval(row, row);
-            Submodule selected = tableModel.getSubmodule(row);
-            if (selected != null) {
-                JPopupMenu menu = createSubmoduleMenu(this, selected);
-                menu.show(table, e.getX(), e.getY());
-            }
-        }
-    }
-
     private void openSelectedSubmodule() {
-        int row = table.getSelectedRow();
-        if (row >= 0) {
-            openSubmodule(this, tableModel.getSubmodule(row));
+        Submodule selected = model.selection().item().get();
+        if (selected != null) {
+            openSubmodule(this, selected);
         }
     }
 
     public static JPopupMenu createSubmoduleMenu(Component parent, Submodule selected) {
-        JPopupMenu menu = new JPopupMenu();
+        return menu()
+                .controls(submoduleControls(parent, () -> selected, null))
+                .buildPopupMenu();
+    }
 
-        JMenuItem initItem = new JMenuItem("Initialize");
-        initItem.addActionListener(ev -> new InitSubmodulesHandler(parent, selected.getPath()).execute());
-        menu.add(initItem);
-
-        JMenuItem updateItem = new JMenuItem("Update");
-        updateItem.addActionListener(ev ->
-                new UpdateSubmodulesHandler(parent, false, selected.getPath()).execute());
-        menu.add(updateItem);
-
-        JMenuItem recursiveItem = new JMenuItem("Recursive update");
-        recursiveItem.addActionListener(ev -> new UpdateSubmodulesHandler(parent, true).execute());
-        menu.add(recursiveItem);
-
-        menu.addSeparator();
-
-        JMenuItem commitItem = new JMenuItem("Commit submodule change…");
-        commitItem.addActionListener(ev -> CommitSubmoduleHandler.showAndExecute(parent, selected));
-        menu.add(commitItem);
-
-        JMenuItem diffItem = new JMenuItem("Show diff");
-        diffItem.addActionListener(ev -> showSubmoduleDiff(parent, selected));
-        menu.add(diffItem);
-
-        JMenuItem statusItem = new JMenuItem("Show status");
-        statusItem.addActionListener(ev -> showSubmoduleStatus(parent, selected));
-        menu.add(statusItem);
-
-        menu.addSeparator();
-
-        JMenuItem openItem = new JMenuItem("Open");
-        openItem.addActionListener(ev -> openSubmodule(parent, selected));
-        menu.add(openItem);
-
-        JMenuItem removeItem = new JMenuItem("Remove…");
-        removeItem.addActionListener(ev -> RemoveSubmoduleHandler.showAndExecute(parent, selected));
-        menu.add(removeItem);
-
-        return menu;
+    /**
+     * @param parent the parent component
+     * @param submodule supplies the submodule the actions apply to
+     * @param enabled enables the actions applying to the submodule, null for always enabled
+     * @return the submodule actions
+     */
+    private static Controls submoduleControls(Component parent, Supplier<Submodule> submodule, ObservableState enabled) {
+        return Controls.builder()
+                .control(Control.builder()
+                        .command(() -> new InitSubmodulesHandler(parent, submodule.get().getPath()).execute())
+                        .caption("Initialize")
+                        .enabled(enabled))
+                .control(Control.builder()
+                        .command(() -> new UpdateSubmodulesHandler(parent, false, submodule.get().getPath()).execute())
+                        .caption("Update")
+                        .enabled(enabled))
+                .control(Control.builder()
+                        .command(() -> new UpdateSubmodulesHandler(parent, true).execute())
+                        .caption("Recursive update"))
+                .separator()
+                .control(Control.builder()
+                        .command(() -> CommitSubmoduleHandler.showAndExecute(parent, submodule.get()))
+                        .caption("Commit submodule change…")
+                        .enabled(enabled))
+                .control(Control.builder()
+                        .command(() -> showSubmoduleDiff(parent, submodule.get()))
+                        .caption("Show diff")
+                        .enabled(enabled))
+                .control(Control.builder()
+                        .command(() -> showSubmoduleStatus(parent, submodule.get()))
+                        .caption("Show status")
+                        .enabled(enabled))
+                .separator()
+                .control(Control.builder()
+                        .command(() -> openSubmodule(parent, submodule.get()))
+                        .caption("Open")
+                        .enabled(enabled))
+                .control(Control.builder()
+                        .command(() -> RemoveSubmoduleHandler.showAndExecute(parent, submodule.get()))
+                        .caption("Remove…")
+                        .enabled(enabled))
+                .build();
     }
 
     public static void showSubmoduleDiff(Component parent, Submodule selected) {
@@ -237,94 +231,65 @@ public class SubmodulePanel extends JPanel {
     private void syncSubmodules() {
         statusBar.setStatus("Syncing submodule URLs...");
         statusBar.showProgress(true);
-        new SwingWorker<Void, Void>() {
-            @Override protected Void doInBackground() throws Exception {
-                Context.getGitRepoService().syncSubmodules();
-                return null;
-            }
-            @Override protected void done() {
-                statusBar.clearProgress();
-                try {
-                    get();
+        ProgressWorker.builder()
+                .task(() -> Context.getGitRepoService().syncSubmodules())
+                .onDone(statusBar::clearProgress)
+                .onSuccess(() -> {
                     statusBar.setStatus("Submodule URLs synced");
                     Context.updateSubmodules();
-                } catch (Exception ex) {
-                    statusBar.setStatus("Sync failed: " + ex.getMessage());
-                    JOptionPane.showMessageDialog(SubmodulePanel.this,
-                            "Sync failed:\n" + ex.getMessage(),
+                })
+                .onException(ex -> {
+                    statusBar.setStatus("Sync failed: " + ex);
+                    JOptionPane.showMessageDialog(this,
+                            "Sync failed:\n" + ex,
                             "Error", JOptionPane.ERROR_MESSAGE);
-                }
-            }
-        }.execute();
+                })
+                .execute();
     }
 
-    // ── Table model ───────────────────────────────────────────────────────────
+    private static String statusLabel(Submodule.Status status) {
+        return switch (status) {
+            case UP_TO_DATE    -> "Up to date";
+            case MODIFIED      -> "Modified";
+            case UNINITIALIZED -> "Uninitialized";
+            case MISSING       -> "Missing";
+        };
+    }
 
-    private static class SubmoduleTableModel extends AbstractTableModel {
+    private static Color statusColor(Submodule.Status status) {
+        return switch (status) {
+            case UP_TO_DATE    -> new Color(0, 140, 0);
+            case MODIFIED      -> new Color(180, 100, 0);
+            case UNINITIALIZED -> Color.GRAY;
+            case MISSING       -> Color.RED;
+        };
+    }
 
-        private static final String[] COLUMNS = {"Path", "Status", "Index SHA", "HEAD SHA", "URL"};
-        private List<Submodule> rows = Collections.emptyList();
+    // ── Table columns ─────────────────────────────────────────────────────────
 
-        void setSubmodules(List<Submodule> list) {
-            this.rows = list != null ? list : Collections.emptyList();
-            fireTableDataChanged();
-        }
+    private static final class SubmoduleColumns implements TableColumns<Submodule, String> {
 
-        Submodule getSubmodule(int row) {
-            Submodule item = null;
-            if (row >= 0 && row < rows.size()) {
-                item = rows.get(row);
-            }
-            return item;
-        }
-
-        @Override public int getRowCount()    { return rows.size(); }
-        @Override public int getColumnCount() { return COLUMNS.length; }
-        @Override public String getColumnName(int col) { return COLUMNS[col]; }
-        @Override public boolean isCellEditable(int row, int col) { return false; }
+        private static final List<String> COLUMNS = List.of(PATH, STATUS, INDEX_SHA, HEAD_SHA, URL);
 
         @Override
-        public Object getValueAt(int row, int col) {
-            Submodule s = rows.get(row);
-            return switch (col) {
-                case 0 -> s.getPath();
-                case 1 -> s.getStatus();
-                case 2 -> s.getIndexSha();
-                case 3 -> s.getHeadSha();
-                case 4 -> s.getUrl();
+        public List<String> identifiers() {
+            return COLUMNS;
+        }
+
+        @Override
+        public Class<?> type(String column) {
+            return column.equals(STATUS) ? Submodule.Status.class : String.class;
+        }
+
+        @Override
+        public Object value(Submodule s, String column) {
+            return switch (column) {
+                case PATH      -> s.getPath();
+                case STATUS    -> s.getStatus();
+                case INDEX_SHA -> s.getIndexSha();
+                case HEAD_SHA  -> s.getHeadSha();
+                case URL       -> s.getUrl();
                 default -> "";
-            };
-        }
-    }
-
-    // ── Status cell renderer ──────────────────────────────────────────────────
-
-    private static class StatusCellRenderer extends DefaultTableCellRenderer {
-        @Override
-        public Component getTableCellRendererComponent(JTable table, Object value,
-                                                       boolean isSelected, boolean hasFocus,
-                                                       int row, int column) {
-            super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            if (value instanceof Submodule.Status status && !isSelected) {
-                setForeground(switch (status) {
-                    case UP_TO_DATE    -> new Color(0, 140, 0);
-                    case MODIFIED      -> new Color(180, 100, 0);
-                    case UNINITIALIZED -> Color.GRAY;
-                    case MISSING       -> Color.RED;
-                });
-            } else if (!isSelected) {
-                setForeground(table.getForeground());
-            }
-            setText(value instanceof Submodule.Status s ? statusLabel(s) : String.valueOf(value));
-            return this;
-        }
-
-        private String statusLabel(Submodule.Status s) {
-            return switch (s) {
-                case UP_TO_DATE    -> "Up to date";
-                case MODIFIED      -> "Modified";
-                case UNINITIALIZED -> "Uninitialized";
-                case MISSING       -> "Missing";
             };
         }
     }
