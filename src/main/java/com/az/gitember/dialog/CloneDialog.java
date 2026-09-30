@@ -6,7 +6,6 @@ import is.codion.common.reactive.state.ObservableState;
 import is.codion.common.reactive.state.State;
 import is.codion.common.reactive.value.Value;
 import is.codion.swing.common.ui.control.Control;
-import is.codion.swing.common.ui.dialog.Dialogs;
 import org.apache.commons.lang3.StringUtils;
 
 import com.az.gitember.ui.misc.Util;
@@ -61,15 +60,13 @@ public class CloneDialog extends JDialog {
                         .label("Repository URL:")
                         .columns(30)
                         .link(url))
-                .add(borderLayoutPanel()
+                .add(directoryInput()
                         .label("Destination:")
-                        .center(stringField()
+                        .dialogTitle("Select Destination Folder")
+                        .filePathField(field -> field
+                                .editable(true)
                                 .columns(25)
-                                .link(destination))
-                        .east(button()
-                                .control(Control.builder()
-                                        .command(this::browseDestination)
-                                        .caption("..."))))
+                                .link(destination)))
                 .span(panel()
                         .layout(new FlowLayout(FlowLayout.LEFT, 0, 0))
                         .opaque(false)
@@ -163,15 +160,6 @@ public class CloneDialog extends JDialog {
             name = name.substring(0, name.length() - 4);
         }
         return name.isBlank() ? null : name;
-    }
-
-    private void browseDestination() {
-        destination.set(Dialogs.select()
-                .files()
-                .owner(this)
-                .title("Select Destination Folder")
-                .selectDirectory()
-                .getAbsolutePath());
     }
 
     private void onClone() {
