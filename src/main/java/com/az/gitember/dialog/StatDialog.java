@@ -92,10 +92,8 @@ public class StatDialog extends JFrame {
                                 .enabled(computing.not())))
                 .build();
 
-        // determinate, with a border, as a JProgressBar is by default
         progressBar = progressBar()
                 .indeterminate(false)
-                .borderPainted(true)
                 .stringPainted(true)
                 .string("")
                 .build();
