@@ -9,11 +9,15 @@ import com.az.gitember.service.OllamaManager;
 import com.az.gitember.ui.FileViewerWindow;
 import com.az.gitember.ui.misc.Util;
 import com.az.gitember.data.Const;
+import is.codion.common.reactive.state.ObservableState;
+import is.codion.common.reactive.state.State;
+import is.codion.common.reactive.value.Value;
+import is.codion.swing.common.ui.component.combobox.Completion;
+import is.codion.swing.common.ui.control.Control;
 import com.formdev.flatlaf.FlatDarkLaf;
 import com.formdev.flatlaf.FlatLightLaf;
 import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.eclipse.jgit.errors.ConfigInvalidException;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.SystemReader;
@@ -25,39 +29,9 @@ import java.text.SimpleDateFormat;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutionException;
 
+import static is.codion.swing.common.ui.component.Components.*;
+
 public class SettingsDialog extends JDialog {
-
-    private final int DEFAULT_SIZE = 250;
-
-    private  JTextField   userName ;
-    private  JTextField   userEmail ;
-
-    private  JComboBox<String> signCombo;
-    private  JLabel keyOrPAth;
-    private  JButton browseBtn;
-    private  JTextField   signKey ;
-    private  JLabel singCommitLabel;
-    private  JCheckBox  signCommit;
-    private  JLabel singTagLabel;
-
-    private  JCheckBox  signTag;
-
-    private  JCheckBox verifySignaturesCheck;
-    private  JRadioButton allowedSignersGlobalRadio;
-    private  JRadioButton allowedSignersRepoRadio;
-    private  JButton editAllowedSignersBtn;
-    private  JButton editRevokedKeysBtn;
-
-    private  JComboBox<String> dateFormatCombo;
-    private  JComboBox<String> timeFormatCombo;
-    private  JComboBox<String> themeCombo;
-    private  JSpinner fontSizeSpinner;
-    private  JTextArea ignoreExtArea;
-    private  JCheckBox leakDetectorCheck;
-    private  JCheckBox branchCompareDescCheck;
-    private  JCheckBox commitMsgGenCheck;
-    private  JComboBox<String> llmModelCombo;
-    private  JTextArea commitTemplateArea;
 
     /**
      * Offered in the model combo, which stays editable — any tag pulled in Ollama works.
@@ -74,6 +48,41 @@ public class SettingsDialog extends JDialog {
 
     private final Settings settings;
 
+    // Common
+    private final Value<String> userName  = Value.nonNull("");
+    private final Value<String> userEmail = Value.nonNull("");
+
+    // Commit
+    private final Value<String> commitTemplate = Value.nonNull("");
+    private JTextArea commitTemplateArea;
+
+    // UI
+    private final Value<String>  theme      = Value.nullable();
+    private final Value<Integer> fontSize   = Value.nullable();
+    private final Value<String>  dateFormat = Value.nullable();
+    private final Value<String>  timeFormat = Value.nullable();
+
+    // Commit signing
+    private final Value<String> signOption        = Value.nullable();
+    private final Value<String> signKey           = Value.nonNull("");
+    private final Value<String> signKeyLabel      = Value.nonNull("Sign key:");
+    private final State         signing           = State.state();
+    private final State         ssh               = State.state();
+    private final State         signCommit        = State.state();
+    private final State         signTag           = State.state();
+    private final State         verifySignatures  = State.state();
+    private final State         globalSigners     = State.state();
+    private final State         repositorySigners = State.state();
+
+    // AI
+    private final State         leakDetector             = State.state();
+    private final State         branchCompareDescription = State.state();
+    private final State         commitMessageGeneration  = State.state();
+    private final Value<String> llmModel                 = Value.nullable();
+
+    // Other
+    private final Value<String> ignoreExtensions = Value.nonNull("");
+
     public SettingsDialog(Frame owner) {
         super(owner, "Settings", true);
         setSize(640, 640);
@@ -82,490 +91,214 @@ public class SettingsDialog extends JDialog {
 
         settings = Context.getSettings();
 
-
         // Show the stored ignore list (defaults are seeded at startup, so this is always populated)
-        String currentIgnore = settings != null
+        ignoreExtensions.set(settings != null
                 ? String.join(", ", settings.getIgnoreCompareFiles())
-                : String.join(", ", Settings.DEFAULT_IGNORE_COMPARE_FILES);
-        ignoreExtArea = new JTextArea(currentIgnore, 3, 30);
-        ignoreExtArea.setLineWrap(true);
-        ignoreExtArea.setWrapStyleWord(true);
-        //ignoreExtArea.setFont(ignoreExtArea.getFont().deriveFont(Font.PLAIN, SyntaxStyleUtil.monoFont().getSize() - 2));
+                : String.join(", ", Settings.DEFAULT_IGNORE_COMPARE_FILES));
 
-        JTabbedPane tabbedPane = new JTabbedPane();
+        JTabbedPane tabbedPane = tabbedPane()
+                .tab("Common", createCommonPanel())
+                .tab("Commit", createCommitTemplatePanel())
+                .tab("UI", createUIPanel())
+                .tab("Commit Signing", createComminSignPanel())
+                .tab("AI", createAIPanel())
+                .tab("Other", createComparePanel())
+                .build();
 
-
-        tabbedPane.addTab("Common", createCommonPanel());
-        tabbedPane.addTab("Commit", createCommitTemplatePanel());
-        tabbedPane.addTab("UI", createUIPanel());
-        tabbedPane.addTab("Commit Signing", createComminSignPanel());
-        tabbedPane.addTab("AI", createAIPanel());
-        tabbedPane.addTab("Other", createComparePanel());
-
-        // Form panel
-        JPanel form = new JPanel(new GridBagLayout());
-        //form.setBorder(BorderFactory.createEmptyBorder(15, 15, 10, 15));
-
-
-        // Buttons
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        JButton okBtn = new JButton("OK");
-        JButton cancelBtn = new JButton("Cancel");
-        buttonPanel.add(okBtn);
-        buttonPanel.add(cancelBtn);
+        JButton okBtn = button()
+                .control(Control.builder()
+                        .command(this::applyAndClose)
+                        .caption("OK"))
+                .build();
 
         getContentPane().setLayout(new BorderLayout());
         getContentPane().add(tabbedPane, BorderLayout.CENTER);
-        getContentPane().add(buttonPanel, BorderLayout.SOUTH);
+        getContentPane().add(flowLayoutPanel(FlowLayout.RIGHT)
+                .add(okBtn)
+                .add(button()
+                        .control(Control.builder()
+                                .command(this::dispose)
+                                .caption("Cancel")))
+                .build(), BorderLayout.SOUTH);
 
-        okBtn.addActionListener(e -> applyAndClose());
-        cancelBtn.addActionListener(e -> dispose());
         getRootPane().setDefaultButton(okBtn);
         Util.bindEscapeToDispose(this);
     }
 
     private JPanel createComparePanel() {
-
-        GridBagConstraints gbc = createGridBagConstraints();
-
-        JPanel comparePanel = new JPanel(new GridBagLayout());
-
-        // 1. Label
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        gbc.gridwidth = 2; // Span both columns
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        gbc.weighty = 0;
-        comparePanel.add(new JLabel("Ignore extensions (folder compare):"), gbc);
-
-        // 2. Scrollable Edit Area (stretches horizontally and vertically)
-        JScrollPane ignoreScroll = new JScrollPane(ignoreExtArea);
-        ignoreScroll.setPreferredSize(new Dimension(200, 64)); // Preferred height: 64px, flexible width
-
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.gridwidth = 2; // Span across column 0 and column 1
-        gbc.fill = GridBagConstraints.BOTH; // Expand in both directions
-        gbc.weightx = 1.0; // Fill horizontal space
-        gbc.weighty = 0.3; // Give it a fixed proportion of vertical space
-        comparePanel.add(ignoreScroll, gbc);
-
-        // 3. Reset Button (aligned to bottom-right)
-        JButton resetBtn = new JButton("Reset to defaults");
-        resetBtn.addActionListener(e -> ignoreExtArea.setText(
-                String.join(", ", Settings.DEFAULT_IGNORE_COMPARE_FILES)));
-
-        gbc.gridx = 1;
-        gbc.gridy = 2;
-        gbc.gridwidth = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.anchor = GridBagConstraints.EAST;
-        gbc.weightx = 0;
-        gbc.weighty = 0;
-        comparePanel.add(resetBtn, gbc);
-
-        // 4. Spacer (pushes everything to the top)
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        gbc.gridwidth = 2;
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        gbc.weightx = 1.0;
-        gbc.weighty = 1.0;
-        comparePanel.add(new JLabel(), gbc);
-
-        return comparePanel;
+        return borderLayoutPanel()
+                .border(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+                .north(label("Ignore extensions (folder compare):"))
+                .center(textArea()
+                        .rowsColumns(3, 30)
+                        .lineWrap(true)
+                        .wrapStyleWord(true)
+                        .link(ignoreExtensions)
+                        .scrollPane())
+                .south(flowLayoutPanel(FlowLayout.RIGHT)
+                        .add(button()
+                                .control(Control.builder()
+                                        .command(() -> ignoreExtensions.set(
+                                                String.join(", ", Settings.DEFAULT_IGNORE_COMPARE_FILES)))
+                                        .caption("Reset to defaults"))))
+                .build();
     }
 
     private JPanel createAIPanel() {
-
         boolean currentLeakDetector = settings == null || !Boolean.FALSE.equals(settings.getEnableLeakDetector());
         boolean currentBranchCompareDesc = settings != null && Boolean.TRUE.equals(settings.getEnableBranchCompareDescription());
         boolean currentCommitMsgGen = settings != null && Boolean.TRUE.equals(settings.getEnableCommitMessageGeneration());
-        String currentLlmModel = settings != null
-                ? settings.getLlmDetectorModel() : Settings.DEFAULT_LLM_DETECTOR_MODEL;
-
-
-        //////////////////////////////  AI
-        JPanel aiPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = createGridBagConstraints();
-
-        // Leak detector
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        aiPanel.add(new JLabel("Enable secret detector (AI experimental):"), gbc);
-
-        leakDetectorCheck = new JCheckBox("", currentLeakDetector);
-        leakDetectorCheck.setToolTipText("Scan staged files for secrets words before each commit");
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        aiPanel.add(leakDetectorCheck, gbc);
-
-        // Branch compare description
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        aiPanel.add(new JLabel("Branch compare description (AI experimental):"), gbc);
-
-        branchCompareDescCheck = new JCheckBox("", currentBranchCompareDesc);
-        branchCompareDescCheck.setToolTipText("Show AI descriptions when comparing branches");
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        aiPanel.add(branchCompareDescCheck, gbc);
-
-        // Commit message generation
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        aiPanel.add(new JLabel("AI commit message generation (AI experimental):"), gbc);
-
-        commitMsgGenCheck = new JCheckBox("", currentCommitMsgGen);
-        commitMsgGenCheck.setToolTipText("Generate commit message suggestions in the commit dialog");
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        aiPanel.add(commitMsgGenCheck, gbc);
-
-        // Model shared by all three features above
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        aiPanel.add(new JLabel("Ollama model:"), gbc);
-
-        llmModelCombo = new JComboBox<>(SUGGESTED_LLM_MODELS);
-        llmModelCombo.setEditable(true);
-        llmModelCombo.setSelectedItem(currentLlmModel);
-        llmModelCombo.setToolTipText("Model the features above ask Ollama for. Any pulled model "
-                + "can be typed in; leave it empty to use " + Settings.DEFAULT_LLM_DETECTOR_MODEL + ".");
-        llmModelCombo.setPreferredSize(new Dimension(220, 25));
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        aiPanel.add(llmModelCombo, gbc);
+        leakDetector.set(currentLeakDetector);
+        branchCompareDescription.set(currentBranchCompareDesc);
+        commitMessageGeneration.set(currentCommitMsgGen);
+        llmModel.set(settings != null
+                ? settings.getLlmDetectorModel() : Settings.DEFAULT_LLM_DETECTOR_MODEL);
 
         // When any AI feature is enabled, verify Ollama is present
-        leakDetectorCheck.addItemListener(e -> {
-            if (leakDetectorCheck.isSelected() && !currentLeakDetector) {
-                ensureOllamaOrRevert(leakDetectorCheck);
-            }
+        leakDetector.addConsumer(on -> {
+            if (on && !currentLeakDetector) ensureOllamaOrRevert(leakDetector);
         });
-        branchCompareDescCheck.addItemListener(e -> {
-            if (branchCompareDescCheck.isSelected() && !currentBranchCompareDesc) {
-                ensureOllamaOrRevert(branchCompareDescCheck);
-            }
+        branchCompareDescription.addConsumer(on -> {
+            if (on && !currentBranchCompareDesc) ensureOllamaOrRevert(branchCompareDescription);
         });
-        commitMsgGenCheck.addItemListener(e -> {
-            if (commitMsgGenCheck.isSelected() && !currentCommitMsgGen) {
-                ensureOllamaOrRevert(commitMsgGenCheck);
-            }
+        commitMessageGeneration.addConsumer(on -> {
+            if (on && !currentCommitMsgGen) ensureOllamaOrRevert(commitMessageGeneration);
         });
 
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        gbc.gridwidth = 2;
-        gbc.weighty = 1.0;
-        aiPanel.add(new JLabel(), gbc);
-        return aiPanel;
+        return form()
+                .border(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+                .add(checkBox()
+                        .link(leakDetector)
+                        .toolTipText("Scan staged files for secrets words before each commit")
+                        .label("Enable secret detector (AI experimental):"))
+                .add(checkBox()
+                        .link(branchCompareDescription)
+                        .toolTipText("Show AI descriptions when comparing branches")
+                        .label("Branch compare description (AI experimental):"))
+                .add(checkBox()
+                        .link(commitMessageGeneration)
+                        .toolTipText("Generate commit message suggestions in the commit dialog")
+                        .label("AI commit message generation (AI experimental):"))
+                // Model shared by all three features above
+                .add(comboBox()
+                        .model(new DefaultComboBoxModel<>(SUGGESTED_LLM_MODELS))
+                        .editable(true)
+                        .link(llmModel)
+                        .toolTipText("Model the features above ask Ollama for. Any pulled model "
+                                + "can be typed in; leave it empty to use " + Settings.DEFAULT_LLM_DETECTOR_MODEL + ".")
+                        .label("Ollama model:"))
+                .build();
     }
-
-
 
     private JPanel createComminSignPanel() {
+        signOption.addConsumer(option -> {
+            signing.set(!Settings.SignOption.NONE.getOption().equalsIgnoreCase(option));
+            ssh.set(Settings.SignOption.SSH.getOption().equalsIgnoreCase(option));
+            if (Settings.SignOption.NONE.getOption().equalsIgnoreCase(option)) {
+                signCommit.set(false);
+                signTag.set(false);
+            } else if (Settings.SignOption.PGP.getOption().equalsIgnoreCase(option)) {
+                signKeyLabel.set("Signing key:");
+            } else if (Settings.SignOption.SSH.getOption().equalsIgnoreCase(option)) {
+                signKeyLabel.set("Path to pub key:");
+            }
+        });
+        signOption.set(settings.getSignOption());
+        signKey.set(settings.getSignKey());
+        signCommit.set(BooleanUtils.toBoolean(settings.getSignCommit()));
+        signTag.set(BooleanUtils.toBoolean(settings.getSignTag()));
+        verifySignatures.set(settings.isVerifyCommitSignatures());
+        repositorySigners.set(settings.isRepositoryAllowedSigners());
+        globalSigners.set(!settings.isRepositoryAllowedSigners());
 
-        JPanel comminSiggPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = createGridBagConstraints();
-
-
-
-        gbc.gridx = 0;
-
-        gbc.gridy = 0;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        comminSiggPanel.add(new JLabel("Sign option:"), gbc);
-
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        signCombo = new JComboBox<>(new String[]{
-                Settings.SignOption.NONE.getOption() ,
-                Settings.SignOption.PGP.getOption() ,
-                Settings.SignOption.SSH.getOption()});
-        signCombo.setSelectedItem(settings.getSignOption());
-
-        signCombo.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        signCombo.setMinimumSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        signCombo.addItemListener(
-                e -> {
-                    String item = e.getItem().toString();
-
-                    setVisibility(true);
-
-                    if (Settings.SignOption.NONE.getOption().equalsIgnoreCase(item)) {
-                        setVisibility(false);
-
-                        signCommit.setSelected(false);
-                        signTag.setSelected(false);
-
-                    } else if (Settings.SignOption.PGP.getOption().equalsIgnoreCase(item)) {
-                        keyOrPAth.setText("Signing key:");
-                        browseBtn.setVisible(false);
-                    } else if (Settings.SignOption.SSH.getOption().equalsIgnoreCase(item)) {
-                        keyOrPAth.setText("Path to pub key:");
-                        browseBtn.setVisible(true);
-                    }
-                }
-        );
-
-
-
-        comminSiggPanel.add(signCombo, gbc);
-
-
-        gbc.gridy = 1;
-        gbc.gridx = 0;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        keyOrPAth = new JLabel("Sign key:");
-        comminSiggPanel.add(keyOrPAth, gbc);
-
-
-        gbc.gridy = 1;
-        gbc.gridx = 1;
-        JPanel destPanel = new JPanel(new BorderLayout(5, 0));
-        // No column count: JTextField.getPreferredSize() recomputes the width from
-        // columns * columnWidth and would discard the preferred size set below.
-        signKey = new JTextField();
-        signKey.setText(settings.getSignKey());
-        signKey.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        signKey.setMinimumSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-
-        browseBtn = new JButton("...");
-        browseBtn.addActionListener(e -> browseKey());
-        destPanel.add(signKey, BorderLayout.CENTER);
-        destPanel.add(browseBtn, BorderLayout.EAST);
-        gbc.gridx = 1; gbc.weightx = 1;
-        comminSiggPanel.add(destPanel, gbc);
-
-        gbc.gridy = 2;
-        gbc.gridx = 0;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        singCommitLabel = new JLabel("Sign commits:");
-        comminSiggPanel.add(singCommitLabel, gbc);
-
-
-        gbc.gridy = 2;
-        gbc.gridx = 1;
-        signCommit = new JCheckBox("", BooleanUtils.toBoolean(settings.getSignCommit()));
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        comminSiggPanel.add(signCommit, gbc);
-
-        gbc.gridy = 3;
-        gbc.gridx = 0;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        singTagLabel = new JLabel("Sign tag:");
-        comminSiggPanel.add(singTagLabel, gbc);
-
-
-        gbc.gridy = 3;
-        gbc.gridx = 1;
-        signTag = new JCheckBox("", BooleanUtils.toBoolean(settings.getSignTag()));
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        comminSiggPanel.add(signTag, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        gbc.gridwidth = 2;
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        gbc.weighty = 0;
-        JLabel verifyHeader = new JLabel("Verification");
-        verifyHeader.setFont(verifyHeader.getFont().deriveFont(Font.BOLD));
-        comminSiggPanel.add(verifyHeader, gbc);
-        gbc.gridwidth = 1;
-
-        gbc.gridx = 0;
-        gbc.gridy = 5;
-        gbc.gridwidth = 2;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        verifySignaturesCheck = new JCheckBox("Verify commit signatures",
-                settings.isVerifyCommitSignatures());
-        verifySignaturesCheck.setToolTipText(
-                "When on, signed commits can be checked against the allowed-signers file on demand");
-        comminSiggPanel.add(verifySignaturesCheck, gbc);
-        gbc.gridwidth = 1;
-
-        gbc.gridx = 0;
-        gbc.gridy = 6;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        JLabel asLabel = new JLabel("Allowed signers:");
-        asLabel.setPreferredSize(new java.awt.Dimension(150, 25));
-        asLabel.setMinimumSize(new java.awt.Dimension(150, 25));
-        comminSiggPanel.add(asLabel, gbc);
-
-        boolean repoSigners = settings.isRepositoryAllowedSigners();
-        allowedSignersGlobalRadio = new JRadioButton(
-                Settings.AllowedSignersFile.GLOBAL_SSH.getOption(), !repoSigners);
-        allowedSignersRepoRadio = new JRadioButton(
-                Settings.AllowedSignersFile.REPOSITORY.getOption(), repoSigners);
         ButtonGroup allowedGroup = new ButtonGroup();
-        allowedGroup.add(allowedSignersGlobalRadio);
-        allowedGroup.add(allowedSignersRepoRadio);
+        ObservableState editSigners = State.and(verifySignatures, globalSigners);
 
-        editAllowedSignersBtn = new JButton("Edit…");
-        editAllowedSignersBtn.setToolTipText("Edit ~/.ssh/allowed_signers");
-        editAllowedSignersBtn.addActionListener(e -> FileViewerWindow.openForEdit(
-                "Edit allowed_signers", GitRepoService.globalSshPath(Const.ALLOWED_SIGNERS_NAME)));
-        editRevokedKeysBtn = new JButton("Edit revoked keys…");
-        editRevokedKeysBtn.setToolTipText("Edit ~/.ssh/revoked_keys");
-        editRevokedKeysBtn.addActionListener(e -> FileViewerWindow.openForEdit(
-                "Edit revoked_keys", GitRepoService.globalSshPath(Const.REVOKED_KEYS_NAME)));
-
-        JPanel globalRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        globalRow.add(allowedSignersGlobalRadio);
-        globalRow.add(editAllowedSignersBtn);
-        globalRow.add(editRevokedKeysBtn);
-        gbc.gridx = 1;
-        gbc.gridy = 6;
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        comminSiggPanel.add(globalRow, gbc);
-
-
-        gbc.gridx = 1;
-        gbc.gridy = 7;
-        gbc.fill = GridBagConstraints.NONE;
-        comminSiggPanel.add(allowedSignersRepoRadio, gbc);
-
-        verifySignaturesCheck.addItemListener(e -> updateSignatureVerificationControls());
-        allowedSignersGlobalRadio.addItemListener(e -> updateSignatureVerificationControls());
-        updateSignatureVerificationControls();
-
-        gbc.gridx = 0;
-        gbc.gridy = 8;
-        gbc.gridwidth = 2;
-        gbc.weighty = 1.0;
-        comminSiggPanel.add(new JLabel(), gbc);
-
-
-        if (Settings.SignOption.NONE.getOption().equalsIgnoreCase(settings.getSignOption())) {
-            setVisibility(false);
-
-        }
-        if (Settings.SignOption.PGP.getOption().equalsIgnoreCase(settings.getSignOption())) {
-            keyOrPAth.setText("Signing key:");
-            browseBtn.setVisible(false);
-        } else if (Settings.SignOption.SSH.getOption().equalsIgnoreCase(settings.getSignOption())) {
-            keyOrPAth.setText("Path to pub key:");
-            browseBtn.setVisible(true);
-        }
-
-
-        return comminSiggPanel;
-
+        return form()
+                .border(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+                .add(comboBox()
+                        .model(new DefaultComboBoxModel<>(new String[]{
+                                Settings.SignOption.NONE.getOption(),
+                                Settings.SignOption.PGP.getOption(),
+                                Settings.SignOption.SSH.getOption()}))
+                        .completionMode(Completion.Mode.NONE)
+                        .link(signOption)
+                        .label("Sign option:"))
+                // the label follows the visibility of the row
+                .add(label()
+                        .text(signKeyLabel)
+                        .build(), borderLayoutPanel()
+                        .layout(new BorderLayout(5, 0))
+                        .visible(signing)
+                        .center(stringField()
+                                .link(signKey)
+                                .visible(signing))
+                        .east(button()
+                                .control(Control.builder()
+                                        .command(this::browseKey)
+                                        .caption("..."))
+                                .visible(ssh))
+                        .build())
+                .add(label("Sign commits:")
+                        .visible(signing)
+                        .build(), checkBox()
+                        .link(signCommit)
+                        .visible(signing)
+                        .build())
+                .add(label("Sign tag:")
+                        .visible(signing)
+                        .build(), checkBox()
+                        .link(signTag)
+                        .visible(signing)
+                        .build())
+                .span(label("Verification")
+                        .font(font -> font.deriveFont(Font.BOLD)))
+                .span(checkBox()
+                        .text("Verify commit signatures")
+                        .link(verifySignatures)
+                        .toolTipText("When on, signed commits can be checked against the allowed-signers file on demand"))
+                .add(label("Allowed signers:").build(), panel()
+                        .layout(new FlowLayout(FlowLayout.LEFT, 0, 0))
+                        .add(radioButton()
+                                .text(Settings.AllowedSignersFile.GLOBAL_SSH.getOption())
+                                .link(globalSigners)
+                                .buttonGroup(allowedGroup)
+                                .enabled(verifySignatures))
+                        .add(button()
+                                .control(Control.builder()
+                                        .command(() -> FileViewerWindow.openForEdit(
+                                                "Edit allowed_signers", GitRepoService.globalSshPath(Const.ALLOWED_SIGNERS_NAME)))
+                                        .caption("Edit…")
+                                        .description("Edit ~/.ssh/allowed_signers")
+                                        .enabled(editSigners)))
+                        .add(button()
+                                .control(Control.builder()
+                                        .command(() -> FileViewerWindow.openForEdit(
+                                                "Edit revoked_keys", GitRepoService.globalSshPath(Const.REVOKED_KEYS_NAME)))
+                                        .caption("Edit revoked keys…")
+                                        .description("Edit ~/.ssh/revoked_keys")
+                                        .enabled(editSigners)))
+                        .build())
+                .add(radioButton()
+                        .text(Settings.AllowedSignersFile.REPOSITORY.getOption())
+                        .link(repositorySigners)
+                        .buttonGroup(allowedGroup)
+                        .enabled(verifySignatures)
+                        .build())
+                .build();
     }
 
-
-    private void setVisibility(boolean visible) {
-        singCommitLabel.setVisible(visible);
-        singTagLabel.setVisible(visible);
-        keyOrPAth.setVisible(visible);
-        browseBtn.setVisible(visible);
-        signCommit.setVisible(visible);
-        signTag.setVisible(visible);
-        signKey.setVisible(visible);
-    }
-
-    private void updateSignatureVerificationControls() {
-        boolean on = verifySignaturesCheck.isSelected();
-        allowedSignersGlobalRadio.setEnabled(on);
-        allowedSignersRepoRadio.setEnabled(on);
-        boolean global = allowedSignersGlobalRadio.isSelected();
-        editAllowedSignersBtn.setEnabled(on && global);
-        editRevokedKeysBtn.setEnabled(on && global);
-    }
     private void browseKey() {
         JFileChooser chooser = new JFileChooser();
         chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
         chooser.setFileHidingEnabled(false);
         chooser.setDialogTitle("Select Key");
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            signKey.setText(chooser.getSelectedFile().getAbsolutePath());
+            signKey.set(chooser.getSelectedFile().getAbsolutePath());
         }
     }
 
-
-    /*// Access the global Git configuration (~/.gitconfig)
-            StoredConfig globalConfig = SystemReader.getInstance().openUserConfig(null, SystemReader.getInstance().getFS());
-
-            // Load existing settings
-            globalConfig.load();
-
-            // Set user.name and user.email under the "user" section
-            globalConfig.setString("user", null, "name", "Your Name");
-            globalConfig.setString("user", null, "email", "your.email@example.com");
-
-            // Save the changes back to the global file
-            globalConfig.save();
-
-            System.out.println("Global Git user.name and user.email updated successfully.");*/
-
     private JPanel createCommonPanel() {
-        JPanel commonPanel = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = createGridBagConstraints();
-
-        // Row 0: Label
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        gbc.weightx = 0; // Fixed width for labels column
-        commonPanel.add(new JLabel("User name:"), gbc);
-
-        // Row 0: Text Field
-        gbc.gridx = 1;
-        gbc.gridy = 0;
-        gbc.weightx = 1.0; // Pushes content to the left by taking all horizontal extra space
-        userName = new JTextField();
-        userName.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        commonPanel.add(userName, gbc);
-
-        // Row 1: Label
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.weightx = 0;
-        commonPanel.add(new JLabel("User email:"), gbc);
-
-        // Row 1: Text Field
-        gbc.gridx = 1;
-        gbc.gridy = 1;
-        gbc.weightx = 1.0; // Consistently push to left on subsequent rows
-        userEmail = new JTextField();
-        userEmail.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        commonPanel.add(userEmail, gbc);
-
-        // Row 2: Vertical spacer pushing components to the top
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        gbc.gridwidth = 2;
-        gbc.weightx = 0;
-        gbc.weighty = 1.0; // Absorbs vertical extra space
-        commonPanel.add(new JLabel(), gbc);
-
-
         StoredConfig globalConfig = SystemReader.getInstance().openUserConfig(null, FS.detect());
 
         try {
@@ -574,47 +307,56 @@ public class SettingsDialog extends JDialog {
             throw new RuntimeException(e);
         }
 
-        userName.setText(globalConfig.getString("user", null, "name"));
-        userEmail.setText(globalConfig.getString("user", null, "email"));
+        userName.set(globalConfig.getString("user", null, "name"));
+        userEmail.set(globalConfig.getString("user", null, "email"));
 
-        return commonPanel;
+        return form()
+                .border(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+                .add(stringField()
+                        .link(userName)
+                        .label("User name:"))
+                .add(stringField()
+                        .link(userEmail)
+                        .label("User email:"))
+                .build();
     }
 
     private JPanel createCommitTemplatePanel() {
-        JPanel panel = new JPanel(new BorderLayout(8, 8));
-        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        commitTemplate.set(settings != null && settings.getCommitTemplate() != null
+                ? settings.getCommitTemplate() : "");
+        commitTemplateArea = textArea()
+                .rowsColumns(12, 40)
+                .lineWrap(true)
+                .wrapStyleWord(true)
+                .name("commitTemplateArea")
+                .font(font -> new Font(Font.MONOSPACED, Font.PLAIN, Math.max(12, font.getSize())))
+                .link(commitTemplate)
+                .build();
 
-        JLabel hint = new JLabel(
-                "<html>Pre-filled in the commit dialog when AI commit message generation is off.<br>"
-                        + "Leave empty to use git's <code>commit.template</code> if it is configured.</html>");
-        hint.setForeground(UIManager.getColor("Label.disabledForeground"));
-        panel.add(hint, BorderLayout.NORTH);
-
-        String current = settings != null && settings.getCommitTemplate() != null
-                ? settings.getCommitTemplate() : "";
-        commitTemplateArea = new JTextArea(current, 12, 40);
-        commitTemplateArea.setName("commitTemplateArea");
-        commitTemplateArea.setLineWrap(true);
-        commitTemplateArea.setWrapStyleWord(true);
-        commitTemplateArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN,
-                Math.max(12, commitTemplateArea.getFont().getSize())));
-        panel.add(new JScrollPane(commitTemplateArea), BorderLayout.CENTER);
-
-        JButton loadGitBtn = new JButton("Load from git commit.template…");
-        loadGitBtn.setName("loadGitCommitTemplateButton");
-        loadGitBtn.setToolTipText("Replace the editor with the file pointed to by git commit.template");
-        loadGitBtn.addActionListener(e -> loadGitCommitTemplate());
-        JPanel south = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        south.add(loadGitBtn);
-        panel.add(south, BorderLayout.SOUTH);
-        return panel;
+        return borderLayoutPanel()
+                .layout(new BorderLayout(8, 8))
+                .border(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+                .north(label("<html>Pre-filled in the commit dialog when AI commit message generation is off.<br>"
+                        + "Leave empty to use git's <code>commit.template</code> if it is configured.</html>")
+                        .foreground(UIManager.getColor("Label.disabledForeground")))
+                .center(scrollPane()
+                        .view(commitTemplateArea))
+                .south(panel()
+                        .layout(new FlowLayout(FlowLayout.LEFT, 0, 0))
+                        .add(button()
+                                .control(Control.builder()
+                                        .command(this::loadGitCommitTemplate)
+                                        .caption("Load from git commit.template…")
+                                        .description("Replace the editor with the file pointed to by git commit.template"))
+                                .name("loadGitCommitTemplateButton")))
+                .build();
     }
 
     private void loadGitCommitTemplate() {
         String fromGit = CommitTemplateService.readGitTemplateFile(
                 Context.getGitRepoService());
         if (StringUtils.isNotBlank(fromGit)) {
-            commitTemplateArea.setText(fromGit);
+            commitTemplate.set(fromGit);
             commitTemplateArea.setCaretPosition(0);
         } else {
             JOptionPane.showMessageDialog(this,
@@ -623,100 +365,54 @@ public class SettingsDialog extends JDialog {
         }
     }
 
-
     private JPanel createUIPanel() {
-
         String currentTheme = settings != null && "dark".equalsIgnoreCase(settings.getTheme()) ? "Dark" : "Light";
         int currentFontSize = settings != null ? settings.getFontSize() : 13;
         if (currentFontSize <= 0) currentFontSize = 13;
+        theme.set(currentTheme);
+        fontSize.set(currentFontSize);
+        dateFormat.set(StringUtils.isEmpty(settings.getDateFormat()) ?
+                GitemberUtil.defaultSimpleDateFormat : settings.getDateFormat());
+        timeFormat.set(StringUtils.isEmpty(settings.getTimeFormat()) ?
+                GitemberUtil.defaultSimpleTimeFormat : settings.getTimeFormat());
 
-        JPanel uiPanel = new JPanel(new GridBagLayout());
-
-        GridBagConstraints gbc = createGridBagConstraints();
-
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        uiPanel.add(new JLabel("Theme:"), gbc);
-
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        themeCombo = new JComboBox<>(new String[]{"Light", "Dark"});
-        themeCombo.setSelectedItem(currentTheme);
-        themeCombo.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        uiPanel.add(themeCombo, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        uiPanel.add(new JLabel("Font size:"), gbc);
-
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        fontSizeSpinner = new JSpinner(new SpinnerNumberModel(currentFontSize, 8, 36, 1));
-        fontSizeSpinner.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        uiPanel.add(fontSizeSpinner, gbc);
-
-
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        uiPanel.add(new JLabel("Date format:"), gbc);
-
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        dateFormatCombo = new JComboBox<>(new String[]{
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd HH:mm",
-                "dd.MM.yyyy HH:mm:ss",
-                "dd.MM.yyyy HH:mm",
-                "MM/dd/yyyy HH:mm:ss",
-                "MM/dd/yyyy HH:mm",
-                "MMM dd, yyyy HH:mm:ss",
-                "MMM dd, yyyy HH:mm"
-        });
-        String fmt = StringUtils.isEmpty(settings.getDateFormat()) ?
-                GitemberUtil.defaultSimpleDateFormat : settings.getDateFormat();
-        dateFormatCombo.setSelectedItem(  fmt);
-        dateFormatCombo.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        uiPanel.add(dateFormatCombo, gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        uiPanel.add(new JLabel("Time format:"), gbc);
-
-        gbc.gridx = 1;
-        gbc.fill = GridBagConstraints.NONE;
-        gbc.weightx = 1.0;
-        timeFormatCombo = new JComboBox<>(new String[]{
-                "HH:mm:ss",
-                "HH:mm",
-                "hh:mm a"
-        });
-        fmt = StringUtils.isEmpty(settings.getTimeFormat()) ?
-                GitemberUtil.defaultSimpleTimeFormat : settings.getTimeFormat();
-        timeFormatCombo.setSelectedItem(fmt);
-        timeFormatCombo.setPreferredSize(new java.awt.Dimension(DEFAULT_SIZE, 25));
-        uiPanel.add(timeFormatCombo, gbc);
-
-
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        gbc.gridwidth = 2;
-        gbc.weighty = 1.0;
-        uiPanel.add(new JLabel(), gbc);
-
-        return uiPanel;
+        return form()
+                .border(BorderFactory.createEmptyBorder(10, 10, 10, 10))
+                .add(comboBox()
+                        .model(new DefaultComboBoxModel<>(new String[]{"Light", "Dark"}))
+                        .completionMode(Completion.Mode.NONE)
+                        .link(theme)
+                        .label("Theme:"))
+                .add(integerSpinner()
+                        .range(8, 36)
+                        .stepSize(1)
+                        .link(fontSize)
+                        .label("Font size:"))
+                .add(comboBox()
+                        .model(new DefaultComboBoxModel<>(new String[]{
+                                "yyyy-MM-dd HH:mm:ss",
+                                "yyyy-MM-dd HH:mm",
+                                "dd.MM.yyyy HH:mm:ss",
+                                "dd.MM.yyyy HH:mm",
+                                "MM/dd/yyyy HH:mm:ss",
+                                "MM/dd/yyyy HH:mm",
+                                "MMM dd, yyyy HH:mm:ss",
+                                "MMM dd, yyyy HH:mm"
+                        }))
+                        .completionMode(Completion.Mode.NONE)
+                        .link(dateFormat)
+                        .label("Date format:"))
+                .add(comboBox()
+                        .model(new DefaultComboBoxModel<>(new String[]{
+                                "HH:mm:ss",
+                                "HH:mm",
+                                "hh:mm a"
+                        }))
+                        .completionMode(Completion.Mode.NONE)
+                        .link(timeFormat)
+                        .label("Time format:"))
+                .build();
     }
-
 
     private void applyAndClose() {
         Settings settings = Context.getSettings();
@@ -725,8 +421,8 @@ public class SettingsDialog extends JDialog {
             return;
         }
 
-        String selectedTheme = (String) themeCombo.getSelectedItem();
-        int selectedFontSize = (int) fontSizeSpinner.getValue();
+        String selectedTheme = theme.get();
+        int selectedFontSize = fontSize.get();
 
         boolean themeChanged = !selectedTheme.equalsIgnoreCase(
                 "dark".equalsIgnoreCase(settings.getTheme()) ? "Dark" : "Light");
@@ -737,36 +433,36 @@ public class SettingsDialog extends JDialog {
 
         // Parse ignore-extensions textarea (comma-separated, strip dots and whitespace)
         TreeSet<String> ignore = new TreeSet<>();
-        for (String tok : ignoreExtArea.getText().split("[,\\s]+")) {
+        for (String tok : ignoreExtensions.get().split("[,\\s]+")) {
             String ext = tok.trim().toLowerCase().replaceAll("^\\.", "");
             if (!ext.isEmpty()) ignore.add(ext);
         }
         // Store exactly what the user typed — no magic substitution
         settings.setIgnoreCompareFiles(ignore);
 
-        settings.setEnableLeakDetector(leakDetectorCheck.isSelected());
-        settings.setEnableBranchCompareDescription(branchCompareDescCheck.isSelected());
-        settings.setEnableCommitMessageGeneration(commitMsgGenCheck.isSelected());
-        settings.setCommitTemplate(commitTemplateArea.getText());
+        settings.setEnableLeakDetector(leakDetector.is());
+        settings.setEnableBranchCompareDescription(branchCompareDescription.is());
+        settings.setEnableCommitMessageGeneration(commitMessageGeneration.is());
+        settings.setCommitTemplate(commitTemplate.get());
 
         // An empty entry means "use the default", which is what the getter falls back to.
-        Object selectedModel = llmModelCombo.getSelectedItem();
+        Object selectedModel = llmModel.get();
         String llmModel = selectedModel != null ? selectedModel.toString().trim() : "";
         settings.setLlmDetectorModel(llmModel.isEmpty() ? null : llmModel);
 
-        settings.setSignOption(signCombo.getSelectedItem().toString());
-        settings.setSignKey(signKey.getText());
-        settings.setSignCommit(signCommit.isSelected());
-        settings.setSignTag(signTag.isSelected());
-        settings.setVerifyCommitSignatures(verifySignaturesCheck.isSelected());
-        if (allowedSignersRepoRadio.isSelected()) {
+        settings.setSignOption(signOption.get());
+        settings.setSignKey(signKey.get());
+        settings.setSignCommit(signCommit.is());
+        settings.setSignTag(signTag.is());
+        settings.setVerifyCommitSignatures(verifySignatures.is());
+        if (repositorySigners.is()) {
             settings.setAllowedSignersFile(Settings.AllowedSignersFile.REPOSITORY.getOption());
         } else {
             settings.setAllowedSignersFile(Settings.AllowedSignersFile.GLOBAL_SSH.getOption());
         }
-        settings.setDateFormat(dateFormatCombo.getSelectedItem().toString());
-        GitemberUtil.simpleDateFormat = new SimpleDateFormat(dateFormatCombo.getSelectedItem().toString());
-        settings.setTimeFormat(timeFormatCombo.getSelectedItem().toString());
+        settings.setDateFormat(dateFormat.get());
+        GitemberUtil.simpleDateFormat = new SimpleDateFormat(dateFormat.get());
+        settings.setTimeFormat(timeFormat.get());
 
 
         Context.saveSettings();
@@ -809,8 +505,8 @@ public class SettingsDialog extends JDialog {
         }
 
         // Set user.name and user.email under the "user" section
-        globalConfig.setString("user", null, "name", userName.getText());
-        globalConfig.setString("user", null, "email", userEmail.getText());
+        globalConfig.setString("user", null, "name", userName.get());
+        globalConfig.setString("user", null, "email", userEmail.get());
 
         // Save the changes back to the global file
         try {
@@ -826,9 +522,9 @@ public class SettingsDialog extends JDialog {
     /**
      * If Ollama is not installed, shows a confirmation dialog. On confirmation,
      * downloads and installs Ollama (showing progress). If the user declines or
-     * the download fails, reverts the checkbox to unchecked.
+     * the download fails, reverts the feature to disabled.
      */
-    private void ensureOllamaOrRevert(JCheckBox checkbox) {
+    private void ensureOllamaOrRevert(State feature) {
         if (OllamaManager.getStatus() != OllamaManager.Status.NOT_INSTALLED) return;
 
         int choice = JOptionPane.showConfirmDialog(
@@ -842,7 +538,7 @@ public class SettingsDialog extends JDialog {
                 JOptionPane.QUESTION_MESSAGE);
 
         if (choice != JOptionPane.YES_OPTION) {
-            checkbox.setSelected(false);
+            feature.set(false);
             return;
         }
 
@@ -912,13 +608,13 @@ public class SettingsDialog extends JDialog {
                         JOptionPane.showMessageDialog(SettingsDialog.this,
                                 "Ollama installation failed:\n" + msg,
                                 "Error", JOptionPane.ERROR_MESSAGE);
-                        checkbox.setSelected(false);
+                        feature.set(false);
                     }
                 } catch (Exception ex) {
                     JOptionPane.showMessageDialog(SettingsDialog.this,
                             "Ollama installation failed:\n" + ex.getMessage(),
                             "Error", JOptionPane.ERROR_MESSAGE);
-                    checkbox.setSelected(false);
+                    feature.set(false);
                 }
             }
         }.execute();
@@ -927,9 +623,9 @@ public class SettingsDialog extends JDialog {
     }
 
     private void disableAllAiFeatures() {
-        leakDetectorCheck.setSelected(false);
-        branchCompareDescCheck.setSelected(false);
-        commitMsgGenCheck.setSelected(false);
+        leakDetector.set(false);
+        branchCompareDescription.set(false);
+        commitMessageGeneration.set(false);
         Settings settings = Context.getSettings();
         if (settings != null) {
             settings.setEnableLeakDetector(false);
@@ -952,11 +648,4 @@ public class SettingsDialog extends JDialog {
         }
     }
 
-    private GridBagConstraints  createGridBagConstraints() {
-        GridBagConstraints gbc = new GridBagConstraints();
-        // Anchor all components to the top-left of their cells
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        gbc.insets = new java.awt.Insets(10,10,10,10); // Optional: add clean padding between controls
-        return gbc;
-    }
 }
