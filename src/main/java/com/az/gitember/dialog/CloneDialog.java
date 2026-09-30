@@ -1,37 +1,36 @@
 package com.az.gitember.dialog;
 
 import com.az.gitember.data.RemoteRepoParameters;
-import com.az.gitember.service.Context;
 import com.az.gitember.service.GitemberUtil;
+import is.codion.common.reactive.state.ObservableState;
+import is.codion.common.reactive.state.State;
+import is.codion.common.reactive.value.Value;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.dialog.Dialogs;
 import org.apache.commons.lang3.StringUtils;
 
 import com.az.gitember.ui.misc.Util;
 
 import javax.swing.*;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
 import java.awt.*;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 public class CloneDialog extends JDialog {
 
-    private final JTextField urlField;
-    private final JTextField destField;
-    private final JTextField userField;
-    private final JPasswordField pwdField;
-    private final JPasswordField tokenField;
-    private final JButton cloneBtn;
-    private final JButton cancelBtn;
-    private final JLabel userLbl;
-    private final JLabel pwdLbl;
-    private final JLabel tokenLbl;
-    private final JRadioButton pwdAuthBtn;
-    private final JRadioButton tokenAuthBtn;
-    private final JPanel authTypePanel;
-    private final JCheckBox shallowCheck;
-    private final JCheckBox withSubmodulesCheck;
-    private final JSpinner  depthSpinner;
-    private final JLabel branchLabel;
-    private final JTextField branchField;
+    private final Value<String> url = Value.nonNull("");
+    private final Value<String> destination = Value.nonNull("");
+    private final Value<String> branch = Value.nonNull("");
+    private final Value<String> userName = Value.nonNull("");
+    private final Value<String> password = Value.nonNull("");
+    private final Value<String> token = Value.nonNull("");
+    private final Value<Integer> depth = Value.nonNull(100);
+    private final State urlSpecified = State.state();
+    private final State http = State.state();
+    private final State passwordAuth = State.state(true);
+    private final State tokenAuth = State.state();
+    private final State shallow = State.state();
+    private final State withSubmodules = State.state();
     private boolean confirmed = false;
 
     public CloneDialog(Frame parent) {
@@ -40,142 +39,94 @@ public class CloneDialog extends JDialog {
         setLocationRelativeTo(parent);
         setResizable(false);
 
-        JPanel formPanel = new JPanel(new GridBagLayout());
-        formPanel.setBorder(BorderFactory.createEmptyBorder(15, 15, 10, 15));
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(5, 5, 5, 5);
-        gbc.fill = GridBagConstraints.HORIZONTAL;
+        destination.set(GitemberUtil.getHomeFolder());
+        url.addConsumer(this::onUrlChanged);
 
-        // URL
-        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0;
-        formPanel.add(new JLabel("Repository URL:"), gbc);
-        urlField = new JTextField(30);
-        gbc.gridx = 1; gbc.weightx = 1;
-        formPanel.add(urlField, gbc);
-
-        // Destination
-        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0;
-        formPanel.add(new JLabel("Destination:"), gbc);
-        JPanel destPanel = new JPanel(new BorderLayout(5, 0));
-        destField = new JTextField(25);
-        destField.setText(GitemberUtil.getHomeFolder());
-        JButton browseBtn = new JButton("...");
-        browseBtn.addActionListener(e -> browseDestination());
-        destPanel.add(destField, BorderLayout.CENTER);
-        destPanel.add(browseBtn, BorderLayout.EAST);
-        gbc.gridx = 1; gbc.weightx = 1;
-        formPanel.add(destPanel, gbc);
-
-
-
-
-
-        // Shallow clone row
-        shallowCheck = new JCheckBox("Clone last commits only (shallow clone)");
-        depthSpinner  = new JSpinner(new SpinnerNumberModel(100, 1, 999999, 1));
-        depthSpinner.setEnabled(false);
-        ((JSpinner.DefaultEditor) depthSpinner.getEditor()).getTextField().setColumns(6);
-        shallowCheck.addActionListener(e -> depthSpinner.setEnabled(shallowCheck.isSelected()));
-        JPanel shallowPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        shallowPanel.setOpaque(false);
-        shallowPanel.add(shallowCheck);
-        shallowPanel.add(Box.createHorizontalStrut(8));
-        shallowPanel.add(depthSpinner);
-        gbc.gridx = 0; gbc.gridy = 2; gbc.gridwidth = 2; gbc.weightx = 1;
-        formPanel.add(shallowPanel, gbc);
-        gbc.gridwidth = 1;
-
-        //submodules
-        withSubmodulesCheck  = new JCheckBox("With submodules");
-        gbc.gridy = 3;
-        gbc.gridx = 0;  gbc.weightx = 0;
-        formPanel.add(withSubmodulesCheck, gbc);
-
-        //specific branch
-        branchLabel = new JLabel("Branch:");
-        branchField = new JTextField(20);
-        branchField.setToolTipText("Comma separated list of branches and tags refs/heads/master,refs/tags/v1.0.0");
-        branchField.putClientProperty("JTextField.placeholderText", "Example: refs/heads/master,refs/tags/v1.0.0");
-        gbc.gridy = 4;
-        gbc.gridx = 0;  gbc.weightx = 0;
-        formPanel.add(branchLabel, gbc);
-        gbc.gridx = 1; gbc.weightx = 1;
-        formPanel.add(branchField, gbc);
-
-        // Auth type selector — shown for HTTPS, hidden for SSH/git@
-        pwdAuthBtn = new JRadioButton("Username & Password", true);
-        tokenAuthBtn = new JRadioButton("Access Token");
+        // The auth type selector is shown for HTTPS, hidden for SSH/git@, along with the credential rows
+        ObservableState passwordRows = State.and(http, passwordAuth);
+        ObservableState tokenRows = State.and(http, tokenAuth);
         ButtonGroup authGroup = new ButtonGroup();
-        authGroup.add(pwdAuthBtn);
-        authGroup.add(tokenAuthBtn);
-        authTypePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        authTypePanel.setOpaque(false);
-        authTypePanel.add(pwdAuthBtn);
-        authTypePanel.add(Box.createHorizontalStrut(16));
-        authTypePanel.add(tokenAuthBtn);
-        authTypePanel.setVisible(false);
-        gbc.gridx = 0; gbc.gridy = 5; gbc.gridwidth = 2; gbc.weightx = 1;
-        formPanel.add(sizePreservingWrapper(authTypePanel), gbc);
-        gbc.gridwidth = 1;
 
-
-        // Username row — shown when HTTPS + Password auth
-        userLbl = new JLabel("Username:");
-        userLbl.setVisible(false);
-        gbc.gridx = 0; gbc.gridy = 6; gbc.weightx = 0;
-        formPanel.add(sizePreservingWrapper(userLbl), gbc);
-        userField = new JTextField(20);
-        userField.setVisible(false);
-        gbc.gridx = 1; gbc.weightx = 1;
-        formPanel.add(sizePreservingWrapper(userField), gbc);
-
-        // Password row — shown when HTTPS + Password auth
-        pwdLbl = new JLabel("Password:");
-        pwdLbl.setVisible(false);
-        gbc.gridx = 0; gbc.gridy = 7; gbc.weightx = 0;
-        formPanel.add(sizePreservingWrapper(pwdLbl), gbc);
-        pwdField = new JPasswordField(20);
-        pwdField.setVisible(false);
-        gbc.gridx = 1; gbc.weightx = 1;
-        formPanel.add(sizePreservingWrapper(pwdField), gbc);
-
-        // Token row — shown when HTTPS + Access Token auth
-        tokenLbl = new JLabel("Token:");
-        tokenLbl.setVisible(false);
-        gbc.gridx = 0; gbc.gridy = 6; gbc.weightx = 0;
-        formPanel.add(sizePreservingWrapper(tokenLbl), gbc);
-        tokenField = new JPasswordField(20);
-        tokenField.setVisible(false);
-        gbc.gridx = 1; gbc.weightx = 1;
-        formPanel.add(sizePreservingWrapper(tokenField), gbc);
-
-
-
-
-        // Wire the auth type radio buttons to switch visible credential rows
-        pwdAuthBtn.addActionListener(e -> applyAuthMode());
-        tokenAuthBtn.addActionListener(e -> applyAuthMode());
-
-        // Wire URL change listener
-        urlField.getDocument().addDocumentListener(new DocumentListener() {
-            @Override public void insertUpdate(DocumentEvent e)  { onUrlChanged(); }
-            @Override public void removeUpdate(DocumentEvent e)  { onUrlChanged(); }
-            @Override public void changedUpdate(DocumentEvent e) { onUrlChanged(); }
-        });
-
-        // Buttons
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        cloneBtn = new JButton("Clone");
-        cloneBtn.setEnabled(false);
-        cloneBtn.addActionListener(e -> onClone());
-        cancelBtn = new JButton("Cancel");
-        cancelBtn.addActionListener(e -> dispose());
-        buttonPanel.add(cloneBtn);
-        buttonPanel.add(cancelBtn);
+        JButton cloneBtn = button()
+                .control(Control.builder()
+                        .command(this::onClone)
+                        .caption("Clone")
+                        .enabled(urlSpecified))
+                .build();
 
         getContentPane().setLayout(new BorderLayout());
-        getContentPane().add(formPanel, BorderLayout.CENTER);
-        getContentPane().add(buttonPanel, BorderLayout.SOUTH);
+        getContentPane().add(form()
+                .border(BorderFactory.createEmptyBorder(15, 15, 10, 15))
+                .add(stringField()
+                        .label("Repository URL:")
+                        .columns(30)
+                        .link(url))
+                .add(borderLayoutPanel()
+                        .label("Destination:")
+                        .center(stringField()
+                                .columns(25)
+                                .link(destination))
+                        .east(button()
+                                .control(Control.builder()
+                                        .command(this::browseDestination)
+                                        .caption("..."))))
+                .span(panel()
+                        .layout(new FlowLayout(FlowLayout.LEFT, 0, 0))
+                        .opaque(false)
+                        .add(checkBox()
+                                .text("Clone last commits only (shallow clone)")
+                                .link(shallow))
+                        .add((JComponent) Box.createHorizontalStrut(8))
+                        .add(integerSpinner()
+                                .range(1, 999999)
+                                .columns(6)
+                                .enabled(shallow)
+                                .link(depth)))
+                .span(checkBox()
+                        .text("With submodules")
+                        .link(withSubmodules))
+                .add(stringField()
+                        .label("Branch:")
+                        .columns(20)
+                        .toolTipText("Comma separated list of branches and tags refs/heads/master,refs/tags/v1.0.0")
+                        .hint("Example: refs/heads/master,refs/tags/v1.0.0")
+                        .link(branch))
+                .span(panel()
+                        .layout(new FlowLayout(FlowLayout.LEFT, 0, 0))
+                        .opaque(false)
+                        .add(radioButton()
+                                .text("Username & Password")
+                                .buttonGroup(authGroup)
+                                .link(passwordAuth))
+                        .add((JComponent) Box.createHorizontalStrut(16))
+                        .add(radioButton()
+                                .text("Access Token")
+                                .buttonGroup(authGroup)
+                                .link(tokenAuth))
+                        .visible(http))
+                .add(stringField()
+                        .label("Username:")
+                        .columns(20)
+                        .visible(passwordRows)
+                        .link(userName))
+                .add(passwordField()
+                        .label("Password:")
+                        .columns(20)
+                        .visible(passwordRows)
+                        .link(password))
+                .add(passwordField()
+                        .label("Token:")
+                        .columns(20)
+                        .visible(tokenRows)
+                        .link(token))
+                .build(), BorderLayout.CENTER);
+        getContentPane().add(flowLayoutPanel(FlowLayout.RIGHT)
+                .add(cloneBtn)
+                .add(button()
+                        .control(Control.builder()
+                                .command(this::dispose)
+                                .caption("Cancel")))
+                .build(), BorderLayout.SOUTH);
 
         getRootPane().setDefaultButton(cloneBtn);
         Util.bindEscapeToDispose(this);
@@ -183,64 +134,19 @@ public class CloneDialog extends JDialog {
 
     // -------------------------------------------------------------------------
 
-    private void onUrlChanged() {
-        String url = urlField.getText().trim();
-        cloneBtn.setEnabled(StringUtils.isNotBlank(url));
+    private void onUrlChanged(String url) {
+        String trimmed = url.trim();
+        urlSpecified.set(StringUtils.isNotBlank(trimmed));
 
-        String repoName = repoNameFromUrl(url);
+        String repoName = repoNameFromUrl(trimmed);
         if (repoName != null) {
             String home = GitemberUtil.getHomeFolder();
-            destField.setText(home != null ? home + repoName : repoName);
+            destination.set(home != null ? home + repoName : repoName);
         } else {
-            destField.setText(GitemberUtil.getHomeFolder());
+            destination.set(GitemberUtil.getHomeFolder());
         }
 
-        boolean isHttp = url.startsWith("https:") || url.startsWith("http:");
-        authTypePanel.setVisible(isHttp);
-        if (isHttp) {
-            applyAuthMode();
-        } else {
-            // SSH / git@ / empty — hide all credential rows
-            userLbl.setVisible(false);
-            userField.setVisible(false);
-            pwdLbl.setVisible(false);
-            pwdField.setVisible(false);
-            tokenLbl.setVisible(false);
-            tokenField.setVisible(false);
-        }
-    }
-
-    private void applyAuthMode() {
-        boolean usePwd = pwdAuthBtn.isSelected();
-        userLbl.setVisible(usePwd);
-        userField.setVisible(usePwd);
-        pwdLbl.setVisible(usePwd);
-        pwdField.setVisible(usePwd);
-        tokenLbl.setVisible(!usePwd);
-        tokenField.setVisible(!usePwd);
-    }
-
-    /**
-     * Wraps a component so that the grid row always reserves the component's
-     * preferred height, even when the component is hidden via setVisible(false).
-     * GridBagLayout normally collapses rows around invisible components; the
-     * wrapper stays visible and reports a constant preferred size, preventing
-     * neighbouring rows from jumping.
-     */
-    private static JPanel sizePreservingWrapper(JComponent content) {
-        JPanel wrapper = new JPanel(new BorderLayout()) {
-            @Override
-            public Dimension getPreferredSize() {
-                return content.getPreferredSize();
-            }
-            @Override
-            public Dimension getMinimumSize() {
-                return content.getPreferredSize();
-            }
-        };
-        wrapper.setOpaque(false);
-        wrapper.add(content, BorderLayout.CENTER);
-        return wrapper;
+        http.set(trimmed.startsWith("https:") || trimmed.startsWith("http:"));
     }
 
     /** Extracts the repository folder name from a clone URL, stripping trailing {@code .git}. */
@@ -260,21 +166,21 @@ public class CloneDialog extends JDialog {
     }
 
     private void browseDestination() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle("Select Destination Folder");
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            destField.setText(chooser.getSelectedFile().getAbsolutePath());
-        }
+        destination.set(Dialogs.select()
+                .files()
+                .owner(this)
+                .title("Select Destination Folder")
+                .selectDirectory()
+                .getAbsolutePath());
     }
 
     private void onClone() {
-        if (urlField.getText().isBlank()) {
+        if (url.get().isBlank()) {
             JOptionPane.showMessageDialog(this, "Repository URL is required",
                     "Validation", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        if (destField.getText().isBlank()) {
+        if (destination.get().isBlank()) {
             JOptionPane.showMessageDialog(this, "Destination folder is required",
                     "Validation", JOptionPane.WARNING_MESSAGE);
             return;
@@ -289,18 +195,18 @@ public class CloneDialog extends JDialog {
 
     public RemoteRepoParameters getParameters() {
         RemoteRepoParameters params = new RemoteRepoParameters();
-        params.setUrl(urlField.getText().trim());
-        params.setDestinationFolder(destField.getText().trim());
-        params.setBranch(branchField.getText());
-        params.setWithSubmodules(withSubmodulesCheck.isSelected());
-        if (tokenAuthBtn.isSelected()) {
-            params.setAccessToken(new String(tokenField.getPassword()));
+        params.setUrl(url.get().trim());
+        params.setDestinationFolder(destination.get().trim());
+        params.setBranch(branch.get());
+        params.setWithSubmodules(withSubmodules.is());
+        if (tokenAuth.is()) {
+            params.setAccessToken(token.get());
         } else {
-            params.setUserName(userField.getText().trim());
-            params.setUserPwd(new String(pwdField.getPassword()));
+            params.setUserName(userName.get().trim());
+            params.setUserPwd(password.get());
         }
-        if (shallowCheck.isSelected()) {
-            params.setDepth((Integer) depthSpinner.getValue());
+        if (shallow.is()) {
+            params.setDepth(depth.get());
         }
         return params;
     }
