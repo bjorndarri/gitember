@@ -1,6 +1,9 @@
 package com.az.gitember.ui;
 
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.reactive.value.Value;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.key.KeyEvents;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
 import org.fife.ui.rtextarea.SearchContext;
 import org.fife.ui.rtextarea.SearchEngine;
@@ -8,12 +11,12 @@ import org.fife.ui.rtextarea.SearchResult;
 import org.kordamp.ikonli.fontawesome5.FontAwesomeSolid;
 
 import javax.swing.*;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
 import java.awt.*;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
 import java.awt.event.KeyEvent;
+
+import static is.codion.swing.common.ui.component.Components.stringField;
 
 /**
  * Compact inline search bar for one or more {@link RSyntaxTextArea} instances.
@@ -27,6 +30,7 @@ import java.awt.event.KeyEvent;
  */
 class SearchBar extends JPanel {
 
+    private final Value<String> searchText = Value.nonNull("");
     private final JTextField searchField;
     private final JLabel statusLabel;
 
@@ -53,7 +57,14 @@ class SearchBar extends JPanel {
 
         add(new JLabel("Find:"));
 
-        searchField = new JTextField(22);
+        searchField = stringField()
+                .columns(22)
+                .link(searchText)
+                .action(Control.command(() -> findNext(true)))
+                .keyEvent(KeyEvents.builder()
+                        .keyCode(KeyEvent.VK_ESCAPE)
+                        .action(Control.command(this::close)))
+                .build();
         add(searchField);
 
         JButton prevBtn = Util.createButton("", "Previous match", FontAwesomeSolid.ANGLE_UP, 0, new Dimension(32, 32));
@@ -71,21 +82,7 @@ class SearchBar extends JPanel {
 
         setVisible(false);
 
-        // Listeners
-        searchField.getDocument().addDocumentListener(new DocumentListener() {
-            public void insertUpdate(DocumentEvent e) { markAll(); }
-            public void removeUpdate(DocumentEvent e) { markAll(); }
-            public void changedUpdate(DocumentEvent e) { markAll(); }
-        });
-
-
-        searchField.addActionListener(e -> findNext(true));
-
-        // Escape closes the bar
-        searchField.registerKeyboardAction(
-                e -> close(),
-                KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
-                JComponent.WHEN_FOCUSED);
+        searchText.addListener(this::markAll);
     }
 
     /** Shows the bar and focuses the search field. */
@@ -108,7 +105,7 @@ class SearchBar extends JPanel {
     }
 
     public void findNext(boolean forward) {
-        String text = searchField.getText();
+        String text = searchText.get();
         if (text.isEmpty()) return;
         RSyntaxTextArea target = activeArea != null ? activeArea
                 : (textAreas.length > 0 ? textAreas[0] : null);
@@ -126,14 +123,14 @@ class SearchBar extends JPanel {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private SearchContext buildContext(boolean forward) {
-        SearchContext ctx = new SearchContext(searchField.getText());
+        SearchContext ctx = new SearchContext(searchText.get());
         ctx.setSearchForward(forward);
         ctx.setWholeWord(false);
         return ctx;
     }
 
     private void markAll() {
-        String text = searchField.getText();
+        String text = searchText.get();
         SearchContext ctx = buildContext(true);
         int total = 0;
         for (RSyntaxTextArea area : textAreas) {
