@@ -7,6 +7,10 @@ import com.az.gitember.service.LlmDiffDescriptionService;
 import com.az.gitember.service.OllamaManager;
 import com.az.gitember.ui.misc.Util;
 import is.codion.common.model.worker.ProgressWorker;
+import is.codion.common.reactive.state.State;
+import is.codion.swing.common.ui.Utilities;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.control.Controls;
 import org.eclipse.jgit.diff.DiffEntry;
 import org.kordamp.ikonli.fontawesome5.FontAwesomeSolid;
 
@@ -68,6 +72,13 @@ public class BranchDiffWindow extends JFrame {
     private boolean syncingScroll    = false;
     private boolean syncingSelection = false;
 
+    private final State diffsPresent      = State.state();
+    private final State aiWorking         = State.state();
+    // what can be opened for the entry selected in the trees, whose selection is synchronised
+    private final State diffSelected      = State.state();
+    private final State leftFileSelected  = State.state();
+    private final State rightFileSelected = State.state();
+
     // ── UI ────────────────────────────────────────────────────────────────────
 
     private final JLabel leftHeader  = new JLabel(" ");
@@ -110,17 +121,19 @@ public class BranchDiffWindow extends JFrame {
         wireSelectionSync(leftTree,  rightTree);
         wireSelectionSync(rightTree, leftTree);
 
-        setupContextMenu(leftTree);
-        setupContextMenu(rightTree);
+        leftTree.addTreeSelectionListener(e -> selectionChanged());
+        JPopupMenu menu = createContextMenu();
+        setupContextMenu(leftTree, menu);
+        setupContextMenu(rightTree, menu);
 
-        prevBtn.setEnabled(false);
-        nextBtn.setEnabled(false);
+        Utilities.enabled(diffsPresent, prevBtn, nextBtn);
         prevBtn.addActionListener(e -> navigateDiff(-1));
         nextBtn.addActionListener(e -> navigateDiff(+1));
 
         boolean aiEnabled = Boolean.TRUE.equals(
                 Context.getSettings() != null && Context.getSettings().getEnableBranchCompareDescription());
         aiDescBtn.setVisible(aiEnabled);
+        Utilities.enabled(aiWorking.not(), aiDescBtn);
         aiDescBtn.setToolTipText("Ask the local Ollama LLM to describe the changes between these revisions");
         aiDescBtn.addActionListener(e -> requestAiDescription());
 
@@ -165,7 +178,7 @@ public class BranchDiffWindow extends JFrame {
     }
 
     private JTree makeTree(BaseRenderer renderer) {
-        JTree t = tree()
+        return tree()
                 .model(treeModel)
                 .rootVisible(false)
                 .showsRootHandles(true)
@@ -182,10 +195,11 @@ public class BranchDiffWindow extends JFrame {
                             openEntry(data.entry);
                     }
                 })
+                .onBuild(tree -> {
+                    tree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
+                    tree.setUI(new FullRowTreeUI(renderer));
+                })
                 .build();
-        t.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
-        t.setUI(new FullRowTreeUI(renderer));
-        return t;
     }
 
     private JPanel buildNavBar() {
@@ -374,8 +388,7 @@ public class BranchDiffWindow extends JFrame {
                 diffNodes.add(node);
         }
         currentDiffIdx = -1;
-        prevBtn.setEnabled(!diffNodes.isEmpty());
-        nextBtn.setEnabled(!diffNodes.isEmpty());
+        diffsPresent.set(!diffNodes.isEmpty());
     }
 
     private DefaultMutableTreeNode buildTreeModel(List<BranchEntry> entries) {
@@ -467,7 +480,7 @@ public class BranchDiffWindow extends JFrame {
             return;
         }
 
-        aiDescBtn.setEnabled(false);
+        aiWorking.set(true);
         aiTextArea.setText("Generating description…  (this may take a minute)");
         aiPanel.setVisible(true);
         mainSplit.setDividerLocation(0.65);
@@ -484,7 +497,7 @@ public class BranchDiffWindow extends JFrame {
                             diffText, branchALabel, branchBLabel,
                             Context.getProjectFolder(), ollamaUrl, modelName);
                 })
-                .onDone(() -> aiDescBtn.setEnabled(true))
+                .onDone(() -> aiWorking.set(false))
                 .onResult(description -> {
                     aiTextArea.setText(description);
                     aiTextArea.setCaretPosition(0);
@@ -579,29 +592,34 @@ public class BranchDiffWindow extends JFrame {
 
     // ── Context menu ──────────────────────────────────────────────────────────
 
-    private void setupContextMenu(JTree tree) {
-        JPopupMenu menu     = new JPopupMenu();
-        JMenuItem diffItem  = new JMenuItem("Open diff");
-        JMenuItem leftItem  = new JMenuItem("Open left file  (" + branchALabel + ")");
-        JMenuItem rightItem = new JMenuItem("Open right file  (" + branchBLabel + ")");
+    private JPopupMenu createContextMenu() {
+        return menu()
+                .controls(Controls.builder()
+                        .control(Control.builder()
+                                .command(() -> openDiff(entryFromTree(leftTree)))
+                                .caption("Open diff")
+                                .enabled(diffSelected))
+                        .separator()
+                        .control(Control.builder()
+                                .command(() -> openSingleFile(entryFromTree(leftTree), true))
+                                .caption("Open left file  (" + branchALabel + ")")
+                                .enabled(leftFileSelected))
+                        .control(Control.builder()
+                                .command(() -> openSingleFile(entryFromTree(leftTree), false))
+                                .caption("Open right file  (" + branchBLabel + ")")
+                                .enabled(rightFileSelected)))
+                .buildPopupMenu();
+    }
 
-        diffItem .addActionListener(e -> { BranchEntry en = entryFromTree(tree); if (en != null) openDiff(en); });
-        leftItem .addActionListener(e -> { BranchEntry en = entryFromTree(tree); if (en != null) openSingleFile(en, true); });
-        rightItem.addActionListener(e -> { BranchEntry en = entryFromTree(tree); if (en != null) openSingleFile(en, false); });
+    private void selectionChanged() {
+        BranchEntry entry = entryFromTree(leftTree);
+        diffSelected.set(entry != null && entry.status() == EntryStatus.DIFFERENT);
+        leftFileSelected.set(entry != null && entry.status() != EntryStatus.RIGHT_ONLY);
+        rightFileSelected.set(entry != null && entry.status() != EntryStatus.LEFT_ONLY);
+    }
 
-        menu.add(diffItem); menu.addSeparator(); menu.add(leftItem); menu.add(rightItem);
-
-        menu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
-            @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
-                BranchEntry en = entryFromTree(tree);
-                diffItem .setEnabled(en != null && en.status() == EntryStatus.DIFFERENT);
-                leftItem .setEnabled(en != null && en.status() != EntryStatus.RIGHT_ONLY);
-                rightItem.setEnabled(en != null && en.status() != EntryStatus.LEFT_ONLY);
-            }
-            @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {}
-            @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {}
-        });
-
+    // Selects the node under the mouse before showing the menu, which a JTree does not
+    private void setupContextMenu(JTree tree, JPopupMenu menu) {
         tree.addMouseListener(new MouseAdapter() {
             private void show(MouseEvent e) {
                 if (!e.isPopupTrigger()) return;
