@@ -4,18 +4,24 @@ import com.az.gitember.data.ScmReflogEntry;
 import com.az.gitember.service.Context;
 import com.az.gitember.service.GitemberUtil;
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.model.component.table.FilterTableModel.TableColumns;
+import is.codion.common.model.worker.ProgressWorker;
+import is.codion.common.reactive.value.Value;
+import is.codion.swing.common.model.component.table.SwingFilterTableModel;
+import is.codion.swing.common.ui.Utilities;
+import is.codion.swing.common.ui.component.table.FilterTable;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.control.Controls;
 import org.kordamp.ikonli.fontawesome5.FontAwesomeSolid;
 
 import javax.swing.*;
-import javax.swing.table.AbstractTableModel;
 import java.awt.*;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 /**
  * Lists Git reflog entries and offers recover actions for deleted branches,
@@ -25,11 +31,18 @@ public class ReflogPanel extends JPanel {
 
     private static final Logger log = Logger.getLogger(ReflogPanel.class.getName());
 
+    private static final String SELECTOR = "Selector";
+    private static final String ACTION   = "Action";
+    private static final String COMMIT   = "Commit";
+    private static final String WHEN     = "When";
+    private static final String MESSAGE  = "Message";
+
     private final StatusBar statusBar;
-    private final JTable table;
-    private final ReflogTableModel tableModel;
+    private final SwingFilterTableModel<ScmReflogEntry, String> model;
+    private final FilterTable<ScmReflogEntry, String> table;
     private final JButton refreshBtn;
     private final JTextField searchField;
+    private final Value<String> filter = Value.nonNull("");
 
     public ReflogPanel(StatusBar statusBar) {
         this.statusBar = statusBar;
@@ -38,47 +51,68 @@ public class ReflogPanel extends JPanel {
         refreshBtn = Util.createButton("Refresh", "Reload reflog", FontAwesomeSolid.SYNC);
         refreshBtn.addActionListener(e -> reload());
 
-        searchField = new JTextField(15);
-        searchField.setPreferredSize(new Dimension(150, 25));
-        searchField.setMinimumSize(new Dimension(100, 25));
-        searchField.setMaximumSize(new Dimension(150, 25));
-        searchField.putClientProperty("JTextField.placeholderText", "Filter reflog...");
-        searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { applyFilter(); }
-            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { applyFilter(); }
-            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { applyFilter(); }
-        });
+        searchField = stringField()
+                .columns(15)
+                .preferredSize(new Dimension(150, 25))
+                .minimumSize(new Dimension(100, 25))
+                .maximumSize(new Dimension(150, 25))
+                .hint("Filter reflog...")
+                .link(filter)
+                .build();
 
-        tableModel = new ReflogTableModel();
-        table = new JTable(tableModel);
-        table.setName("reflogTable");
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        table.setRowHeight(24);
-        table.setShowGrid(false);
-        table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
-        table.getColumnModel().getColumn(0).setPreferredWidth(140);
-        table.getColumnModel().getColumn(1).setPreferredWidth(80);
-        table.getColumnModel().getColumn(2).setPreferredWidth(80);
-        table.getColumnModel().getColumn(3).setPreferredWidth(140);
-        table.getColumnModel().getColumn(4).setPreferredWidth(420);
+        model = SwingFilterTableModel.builder()
+                .columns(new ReflogColumns())
+                .items(() -> Context.getGitRepoService().getReflogEntries())
+                .onRefreshException(ex -> {
+                    log.log(Level.WARNING, "Cannot load reflog", ex);
+                    statusBar.setStatus("Cannot load reflog: " + ex);
+                })
+                .build();
+        filter.addConsumer(text -> model.items().included().predicate().set(filterPredicate(text)));
 
-        table.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mousePressed(MouseEvent e) {
-                if (e.isPopupTrigger()) {
-                    showContextMenu(e);
-                }
-            }
+        Controls menuControls = Controls.builder()
+                .control(Control.builder()
+                        .command(() -> recoverDeletedBranch(selected()))
+                        .caption("Recover deleted branch...")
+                        .enabled(model.selection().present()))
+                .control(Control.builder()
+                        .command(() -> recoverHardReset(selected()))
+                        .caption("Recover hard reset...")
+                        .enabled(model.selection().present()))
+                .control(Control.builder()
+                        .command(() -> recoverDeletedCommit(selected()))
+                        .caption("Recover deleted commit...")
+                        .enabled(model.selection().present()))
+                .control(Control.builder()
+                        .command(() -> recoverStash(selected()))
+                        .caption("Recover stash...")
+                        .enabled(model.selection().present()))
+                .separator()
+                .control(Control.builder()
+                        .command(() -> copySha(selected()))
+                        .caption("Copy commit SHA")
+                        .enabled(model.selection().present()))
+                .build();
 
-            @Override
-            public void mouseReleased(MouseEvent e) {
-                if (e.isPopupTrigger()) {
-                    showContextMenu(e);
-                }
-            }
-        });
+        table = FilterTable.builder()
+                .model(model)
+                .columns(column -> column.preferredWidth(switch (column.identifier()) {
+                    case SELECTOR, WHEN -> 140;
+                    case ACTION, COMMIT -> 80;
+                    default -> 420;
+                }))
+                .name("reflogTable")
+                .selectionMode(ListSelectionModel.SINGLE_SELECTION)
+                .rowHeight(24)
+                .showGrid(false)
+                .autoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN)
+                .sortable(false)
+                .popupControls(t -> menuControls)
+                .build();
 
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        add(scrollPane()
+                .view(table)
+                .build(), BorderLayout.CENTER);
     }
 
     public JButton getRefreshBtn() {
@@ -90,75 +124,25 @@ public class ReflogPanel extends JPanel {
     }
 
     public void dispose() {
-        tableModel.setItems(List.of());
+        model.items().clear();
     }
 
     public void reload() {
         statusBar.setStatus("Loading reflog...");
-        new SwingWorker<List<ScmReflogEntry>, Void>() {
-            @Override
-            protected List<ScmReflogEntry> doInBackground() {
-                return Context.getGitRepoService().getReflogEntries();
-            }
-
-            @Override
-            protected void done() {
-                try {
-                    tableModel.setItems(get());
-                    applyFilter();
-                    statusBar.setStatus("Reflog: " + tableModel.getRowCount() + " entries");
-                } catch (Exception ex) {
-                    log.log(Level.WARNING, "Cannot load reflog", ex);
-                    statusBar.setStatus("Cannot load reflog: " + ex.getMessage());
-                }
-            }
-        }.execute();
+        model.items().refresh(entries ->
+                statusBar.setStatus("Reflog: " + model.items().included().size() + " entries"));
     }
 
-    private void applyFilter() {
-        tableModel.applyFilter(searchField.getText());
+    private ScmReflogEntry selected() {
+        return model.selection().item().get();
     }
 
-    private void showContextMenu(MouseEvent e) {
-        int row = table.rowAtPoint(e.getPoint());
-        if (row < 0) {
-            return;
+    private void copySha(ScmReflogEntry entry) {
+        String sha = entry.recoveryCommitId();
+        if (sha != null && !sha.isBlank()) {
+            Utilities.setClipboard(sha);
+            statusBar.setStatus("Copied " + entry.getShortNewId());
         }
-        table.setRowSelectionInterval(row, row);
-        ScmReflogEntry entry = tableModel.getItemAt(row);
-        if (entry == null) {
-            return;
-        }
-
-        JPopupMenu menu = new JPopupMenu();
-        JMenuItem recoverBranch = new JMenuItem("Recover deleted branch...");
-        recoverBranch.addActionListener(ev -> recoverDeletedBranch(entry));
-        menu.add(recoverBranch);
-
-        JMenuItem recoverReset = new JMenuItem("Recover hard reset...");
-        recoverReset.addActionListener(ev -> recoverHardReset(entry));
-        menu.add(recoverReset);
-
-        JMenuItem recoverCommit = new JMenuItem("Recover deleted commit...");
-        recoverCommit.addActionListener(ev -> recoverDeletedCommit(entry));
-        menu.add(recoverCommit);
-
-        JMenuItem recoverStash = new JMenuItem("Recover stash...");
-        recoverStash.addActionListener(ev -> recoverStash(entry));
-        menu.add(recoverStash);
-
-        menu.addSeparator();
-        JMenuItem copySha = new JMenuItem("Copy commit SHA");
-        copySha.addActionListener(ev -> {
-            String sha = entry.recoveryCommitId();
-            if (sha != null && !sha.isBlank()) {
-                Toolkit.getDefaultToolkit().getSystemClipboard()
-                        .setContents(new java.awt.datatransfer.StringSelection(sha), null);
-                statusBar.setStatus("Copied " + entry.getShortNewId());
-            }
-        });
-        menu.add(copySha);
-        menu.show(table, e.getX(), e.getY());
     }
 
     private void recoverDeletedBranch(ScmReflogEntry entry) {
@@ -223,31 +207,24 @@ public class ReflogPanel extends JPanel {
         }
     }
 
-    private void runRecover(String title, RecoverAction action) {
+    private void runRecover(String title, ProgressWorker.ResultTask<String> action) {
         statusBar.setStatus(title + "...");
         statusBar.showProgress(true);
-        new SwingWorker<String, Void>() {
-            @Override
-            protected String doInBackground() throws Exception {
-                return action.run();
-            }
-
-            @Override
-            protected void done() {
-                statusBar.clearProgress();
-                try {
-                    String msg = get();
+        ProgressWorker.builder()
+                .task(action)
+                .onDone(statusBar::clearProgress)
+                .onResult(msg -> {
                     statusBar.setStatus(msg);
                     reload();
-                } catch (Exception ex) {
+                })
+                .onException(ex -> {
                     log.log(Level.WARNING, title + " failed", ex);
                     statusBar.setStatus(title + " failed");
-                    JOptionPane.showMessageDialog(ReflogPanel.this,
-                            title + " failed:\n" + ex.getMessage(),
+                    JOptionPane.showMessageDialog(this,
+                            title + " failed:\n" + ex,
                             "Error", JOptionPane.ERROR_MESSAGE);
-                }
-            }
-        }.execute();
+                })
+                .execute();
     }
 
     private static String shortOrEmpty(String sha) {
@@ -258,81 +235,47 @@ public class ReflogPanel extends JPanel {
         return shortId;
     }
 
-    @FunctionalInterface
-    private interface RecoverAction {
-        String run() throws Exception;
+    private static java.util.function.Predicate<ScmReflogEntry> filterPredicate(String text) {
+        String filter = text.trim().toLowerCase(Locale.ROOT);
+
+        return filter.isEmpty() ? null : entry -> matches(entry, filter);
     }
 
-    private static class ReflogTableModel extends AbstractTableModel {
-        private static final String[] COLS = {"Selector", "Action", "Commit", "When", "Message"};
-        private final List<ScmReflogEntry> all = new ArrayList<>();
-        private final List<ScmReflogEntry> shown = new ArrayList<>();
-        private String filter = "";
+    private static boolean matches(ScmReflogEntry e, String f) {
+        return contains(e.getSelector(), f)
+                || contains(e.getKind(), f)
+                || contains(e.getComment(), f)
+                || contains(e.getNewId(), f)
+                || contains(e.getOldId(), f)
+                || contains(e.getWhoName(), f);
+    }
 
-        void setItems(List<ScmReflogEntry> items) {
-            all.clear();
-            if (items != null) {
-                all.addAll(items);
-            }
-            applyFilter(filter);
-        }
+    private static boolean contains(String value, String f) {
+        return value != null && value.toLowerCase(Locale.ROOT).contains(f);
+    }
 
-        void applyFilter(String text) {
-            filter = text != null ? text.trim().toLowerCase(Locale.ROOT) : "";
-            shown.clear();
-            for (ScmReflogEntry e : all) {
-                if (filter.isEmpty() || matches(e, filter)) {
-                    shown.add(e);
-                }
-            }
-            fireTableDataChanged();
-        }
+    private static final class ReflogColumns implements TableColumns<ScmReflogEntry, String> {
 
-        ScmReflogEntry getItemAt(int row) {
-            ScmReflogEntry item = null;
-            if (row >= 0 && row < shown.size()) {
-                item = shown.get(row);
-            }
-            return item;
-        }
+        private static final List<String> COLUMNS = List.of(SELECTOR, ACTION, COMMIT, WHEN, MESSAGE);
 
-        private static boolean matches(ScmReflogEntry e, String f) {
-            return contains(e.getSelector(), f)
-                    || contains(e.getKind(), f)
-                    || contains(e.getComment(), f)
-                    || contains(e.getNewId(), f)
-                    || contains(e.getOldId(), f)
-                    || contains(e.getWhoName(), f);
-        }
-
-        private static boolean contains(String value, String f) {
-            return value != null && value.toLowerCase(Locale.ROOT).contains(f);
+        @Override
+        public List<String> identifiers() {
+            return COLUMNS;
         }
 
         @Override
-        public int getRowCount() {
-            return shown.size();
+        public Class<?> type(String column) {
+            return String.class;
         }
 
         @Override
-        public int getColumnCount() {
-            return COLS.length;
-        }
-
-        @Override
-        public String getColumnName(int column) {
-            return COLS[column];
-        }
-
-        @Override
-        public Object getValueAt(int rowIndex, int columnIndex) {
-            ScmReflogEntry e = shown.get(rowIndex);
-            return switch (columnIndex) {
-                case 0 -> e.getSelector();
-                case 1 -> e.getKind();
-                case 2 -> e.getShortNewId();
-                case 3 -> e.getWhen() != null ? GitemberUtil.formatDate(e.getWhen()) : "";
-                case 4 -> e.getComment();
+        public Object value(ScmReflogEntry e, String column) {
+            return switch (column) {
+                case SELECTOR -> e.getSelector();
+                case ACTION   -> e.getKind();
+                case COMMIT   -> e.getShortNewId();
+                case WHEN     -> e.getWhen() != null ? GitemberUtil.formatDate(e.getWhen()) : "";
+                case MESSAGE  -> e.getComment();
                 default -> "";
             };
         }
