@@ -20,8 +20,6 @@ import javax.swing.event.TreeExpansionListener;
 import javax.swing.plaf.basic.BasicTreeUI;
 import javax.swing.tree.*;
 import java.awt.*;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
 import java.io.File;
 import java.util.*;
 import java.util.List;
@@ -113,8 +111,9 @@ public class BranchDiffWindow extends JFrame {
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
 
         treeModel = new DefaultTreeModel(new DefaultMutableTreeNode("root"));
-        leftTree  = makeTree(new LeftRenderer());
-        rightTree = makeTree(new RightRenderer());
+        Controls contextMenu = contextMenuControls();
+        leftTree  = makeTree(new LeftRenderer(), contextMenu);
+        rightTree = makeTree(new RightRenderer(), contextMenu);
 
         wireExpansionSync(leftTree,  rightTree);
         wireExpansionSync(rightTree, leftTree);
@@ -122,9 +121,6 @@ public class BranchDiffWindow extends JFrame {
         wireSelectionSync(rightTree, leftTree);
 
         leftTree.addTreeSelectionListener(e -> selectionChanged());
-        JPopupMenu menu = createContextMenu();
-        setupContextMenu(leftTree, menu);
-        setupContextMenu(rightTree, menu);
 
         Utilities.enabled(diffsPresent, prevBtn, nextBtn);
         prevBtn.addActionListener(e -> navigateDiff(-1));
@@ -177,28 +173,18 @@ public class BranchDiffWindow extends JFrame {
         }
     }
 
-    private JTree makeTree(BaseRenderer renderer) {
+    private JTree makeTree(BaseRenderer renderer, Controls contextMenu) {
         return tree()
                 .model(treeModel)
                 .rootVisible(false)
                 .showsRootHandles(true)
                 .rowHeight(22)
                 .cellRenderer(renderer)
-                .mouseListener(new MouseAdapter() {
-                    @Override
-                    public void mouseClicked(MouseEvent e) {
-                        if (e.getClickCount() != 2) return;
-                        TreePath path = ((JTree) e.getSource()).getPathForLocation(e.getX(), e.getY());
-                        if (path == null) return;
-                        DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
-                        if (node.isLeaf() && node.getUserObject() instanceof NodeData data && data.isFile())
-                            openEntry(data.entry);
-                    }
-                })
-                .onBuild(tree -> {
-                    tree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
-                    tree.setUI(new FullRowTreeUI(renderer));
-                })
+                .selectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION)
+                // the selections are synced, so leftTree holds the double-clicked node
+                .doubleClick(Control.command(() -> openEntry(entryFromTree(leftTree))))
+                .popupControls(tree -> contextMenu)
+                .onBuild(tree -> tree.setUI(new FullRowTreeUI(renderer)))
                 .build();
     }
 
@@ -592,23 +578,22 @@ public class BranchDiffWindow extends JFrame {
 
     // ── Context menu ──────────────────────────────────────────────────────────
 
-    private JPopupMenu createContextMenu() {
-        return menu()
-                .controls(Controls.builder()
-                        .control(Control.builder()
-                                .command(() -> openDiff(entryFromTree(leftTree)))
-                                .caption("Open diff")
-                                .enabled(diffSelected))
-                        .separator()
-                        .control(Control.builder()
-                                .command(() -> openSingleFile(entryFromTree(leftTree), true))
-                                .caption("Open left file  (" + branchALabel + ")")
-                                .enabled(leftFileSelected))
-                        .control(Control.builder()
-                                .command(() -> openSingleFile(entryFromTree(leftTree), false))
-                                .caption("Open right file  (" + branchBLabel + ")")
-                                .enabled(rightFileSelected)))
-                .buildPopupMenu();
+    private Controls contextMenuControls() {
+        return Controls.builder()
+                .control(Control.builder()
+                        .command(() -> openDiff(entryFromTree(leftTree)))
+                        .caption("Open diff")
+                        .enabled(diffSelected))
+                .separator()
+                .control(Control.builder()
+                        .command(() -> openSingleFile(entryFromTree(leftTree), true))
+                        .caption("Open left file  (" + branchALabel + ")")
+                        .enabled(leftFileSelected))
+                .control(Control.builder()
+                        .command(() -> openSingleFile(entryFromTree(leftTree), false))
+                        .caption("Open right file  (" + branchBLabel + ")")
+                        .enabled(rightFileSelected))
+                .build();
     }
 
     private void selectionChanged() {
@@ -616,20 +601,6 @@ public class BranchDiffWindow extends JFrame {
         diffSelected.set(entry != null && entry.status() == EntryStatus.DIFFERENT);
         leftFileSelected.set(entry != null && entry.status() != EntryStatus.RIGHT_ONLY);
         rightFileSelected.set(entry != null && entry.status() != EntryStatus.LEFT_ONLY);
-    }
-
-    // Selects the node under the mouse before showing the menu, which a JTree does not
-    private void setupContextMenu(JTree tree, JPopupMenu menu) {
-        tree.addMouseListener(new MouseAdapter() {
-            private void show(MouseEvent e) {
-                if (!e.isPopupTrigger()) return;
-                TreePath p = tree.getPathForLocation(e.getX(), e.getY());
-                if (p != null) tree.setSelectionPath(p);
-                menu.show(tree, e.getX(), e.getY());
-            }
-            @Override public void mousePressed(MouseEvent e)  { show(e); }
-            @Override public void mouseReleased(MouseEvent e) { show(e); }
-        });
     }
 
     // ── Legend ────────────────────────────────────────────────────────────────
