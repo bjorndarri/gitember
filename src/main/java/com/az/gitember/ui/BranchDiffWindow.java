@@ -176,6 +176,7 @@ public class BranchDiffWindow extends JFrame {
     private JTree makeTree(BaseRenderer renderer, Controls contextMenu) {
         return tree()
                 .model(treeModel)
+                .ui(new FullRowTreeUI(renderer))
                 .rootVisible(false)
                 .showsRootHandles(true)
                 .rowHeight(22)
@@ -184,7 +185,6 @@ public class BranchDiffWindow extends JFrame {
                 // the selections are synced, so leftTree holds the double-clicked node
                 .doubleClick(Control.command(() -> openEntry(entryFromTree(leftTree))))
                 .popupControls(tree -> contextMenu)
-                .onBuild(tree -> tree.setUI(new FullRowTreeUI(renderer)))
                 .build();
     }
 
