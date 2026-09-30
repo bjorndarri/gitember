@@ -3,14 +3,24 @@ package com.az.gitember.dialog;
 import com.az.gitember.data.WorktreeInfo;
 import com.az.gitember.service.Context;
 import com.az.gitember.ui.misc.Util;
+import is.codion.common.model.component.table.FilterTableModel.TableColumns;
+import is.codion.common.model.worker.ProgressWorker;
+import is.codion.common.reactive.state.ObservableState;
+import is.codion.common.reactive.state.State;
+import is.codion.swing.common.model.component.table.SwingFilterTableModel;
+import is.codion.swing.common.ui.component.table.FilterTable;
+import is.codion.swing.common.ui.control.Control;
+import is.codion.swing.common.ui.control.Controls;
 
 import javax.swing.*;
-import javax.swing.table.AbstractTableModel;
 import java.awt.*;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import static is.codion.swing.common.ui.component.Components.*;
 
 /**
  * Dialog for managing Git worktrees.
@@ -20,19 +30,21 @@ public class WorktreesDialog extends JDialog {
 
     private static final Logger log = Logger.getLogger(WorktreesDialog.class.getName());
 
-    private final WorktreeTableModel model = new WorktreeTableModel();
-    private final JTable table;
-    private final JButton addBtn    = new JButton("Add…");
-    private final JButton removeBtn = new JButton("Remove");
-    private final JButton openBtn   = new JButton("Open");
-    private final JButton pruneBtn  = new JButton("Prune");
-    private final JLabel  statusLbl = new JLabel(" ");
+    private static final String PATH   = "Path";
+    private static final String BRANCH = "Branch";
+    private static final String HEAD   = "HEAD";
+    private static final String STATUS = "Status";
+
+    private final SwingFilterTableModel<WorktreeInfo, String> model = SwingFilterTableModel.builder()
+            .columns(new WorktreeColumns())
+            .items(WorktreesDialog::listWorktrees)
+            .onRefreshException(ex -> log.log(Level.WARNING, "Failed to list worktrees", ex))
+            .build();
+    private final State busy = State.state();
+    private final State mainSelected = State.state();
 
     /** Set to the worktree the user wants to open; {@code null} if none chosen. */
     private WorktreeInfo selectedToOpen;
-
-    /** Latest worktree snapshot – passed to AddWorktreeDialog to derive next sequence number. */
-    private List<WorktreeInfo> currentWorktrees = new ArrayList<>();
 
     public WorktreesDialog(Frame parent) {
         super(parent, "Worktrees", true);
@@ -40,116 +52,93 @@ public class WorktreesDialog extends JDialog {
         setLocationRelativeTo(parent);
         setMinimumSize(new Dimension(500, 250));
 
-        table = new JTable(model);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        table.setAutoCreateRowSorter(true);
-        table.getColumnModel().getColumn(0).setPreferredWidth(280);
-        table.getColumnModel().getColumn(1).setPreferredWidth(160);
-        table.getColumnModel().getColumn(2).setPreferredWidth(80);
-        table.getColumnModel().getColumn(3).setPreferredWidth(60);
+        model.selection().item().addConsumer(wt -> mainSelected.set(wt != null && wt.isMain()));
+        ObservableState selected = State.and(model.selection().present(), busy.not());
 
-        table.getSelectionModel().addListSelectionListener(e -> updateButtons());
-
-        JScrollPane scroll = new JScrollPane(table);
-
-        // Button panel
-        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
-        btnPanel.add(addBtn);
-        btnPanel.add(removeBtn);
-        btnPanel.add(openBtn);
-       // btnPanel.add(pruneBtn);
-
-        // Status bar
-        JPanel statusPanel = new JPanel(new BorderLayout());
-        statusPanel.setBorder(BorderFactory.createEmptyBorder(2, 6, 4, 6));
-       // statusPanel.add(statusLbl, BorderLayout.WEST);
-
-        JPanel south = new JPanel(new BorderLayout());
-        south.add(btnPanel, BorderLayout.NORTH);
-        south.add(statusPanel, BorderLayout.SOUTH);
-
-        JButton closeBtn = new JButton("Close");
-        closeBtn.addActionListener(e -> dispose());
-        JPanel closePanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
-        closePanel.add(closeBtn);
-        south.add(closePanel, BorderLayout.EAST);
+        Control add = Control.builder()
+                .command(this::onAdd)
+                .caption("Add…")
+                .enabled(busy.not())
+                .build();
+        Control remove = Control.builder()
+                .command(this::onRemove)
+                .caption("Remove")
+                .enabled(State.and(selected, mainSelected.not()))
+                .build();
+        Control open = Control.builder()
+                .command(this::onOpen)
+                .caption("Open")
+                .enabled(selected)
+                .build();
+        Control prune = Control.builder()
+                .command(this::onPrune)
+                .caption("Prune")
+                .enabled(busy.not())
+                .build();
 
         getContentPane().setLayout(new BorderLayout(4, 4));
-        getContentPane().add(scroll, BorderLayout.CENTER);
-        getContentPane().add(south, BorderLayout.SOUTH);
-
-        addBtn.addActionListener(e -> onAdd());
-        removeBtn.addActionListener(e -> onRemove());
-        openBtn.addActionListener(e -> onOpen());
-        pruneBtn.addActionListener(e -> onPrune());
+        getContentPane().add(scrollPane()
+                .view(FilterTable.builder()
+                        .model(model)
+                        .columns(column -> column.preferredWidth(switch (column.identifier()) {
+                            case PATH -> 280;
+                            case BRANCH -> 160;
+                            case HEAD -> 80;
+                            default -> 60;
+                        }))
+                        .selectionMode(ListSelectionModel.SINGLE_SELECTION)
+                        .autoResizeMode(JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS)
+                        .build())
+                .build(), BorderLayout.CENTER);
+        getContentPane().add(borderLayoutPanel()
+                .layout(new BorderLayout())
+                // the space of the status bar, whose label is not shown
+                .border(BorderFactory.createEmptyBorder(0, 0, 6, 0))
+                .north(flowLayoutPanel(FlowLayout.LEFT)
+                        .add(buttonPanel()
+                                .controls(Controls.builder()
+                                        .control(add)
+                                        .control(remove)
+                                        .control(open))))
+                                        // .control(prune)
+                .east(flowLayoutPanel(FlowLayout.RIGHT)
+                        .add(button()
+                                .control(Control.builder()
+                                        .command(this::dispose)
+                                        .caption("Close"))))
+                .build(), BorderLayout.SOUTH);
 
         Util.bindEscapeToDispose(this);
-        updateButtons();
-        loadWorktrees();
+        model.items().refresh();
     }
 
-    private void loadWorktrees() {
-        statusLbl.setText("Loading…");
-        SwingWorker<List<WorktreeInfo>, Void> worker = new SwingWorker<>() {
-            @Override
-            protected List<WorktreeInfo> doInBackground() throws Exception {
-                return Context.getGitRepoService().listWorktrees();
-            }
-            @Override
-            protected void done() {
-                try {
-                    currentWorktrees = get();
-                    model.setData(currentWorktrees);
-                    statusLbl.setText(model.getRowCount() + " worktree(s)");
-                } catch (Exception ex) {
-                    log.log(Level.WARNING, "Failed to list worktrees", ex);
-                    statusLbl.setText("Error: " + ex.getMessage());
-                }
-                updateButtons();
-            }
-        };
-        worker.execute();
+    private static Collection<WorktreeInfo> listWorktrees() {
+        try {
+            return Context.getGitRepoService().listWorktrees();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private void onAdd() {
-        WorktreeCreateDialog dlg = new WorktreeCreateDialog(this, currentWorktrees);
+        WorktreeCreateDialog dlg = new WorktreeCreateDialog(this, new ArrayList<>(model.items().get()));
         dlg.setVisible(true);
         if (dlg.isConfirmed()) {
             String path       = dlg.getPath();
             String branchName = dlg.getBranch();
             boolean newBranch = dlg.isNewBranch();
 
-            statusLbl.setText("Adding worktree…");
-            setButtonsEnabled(false);
-
-            SwingWorker<Void, Void> worker = new SwingWorker<>() {
-                @Override
-                protected Void doInBackground() throws Exception {
-                    Context.getGitRepoService().addWorktree(path, branchName, newBranch);
-                    return null;
-                }
-                @Override
-                protected void done() {
-                    setButtonsEnabled(true);
-                    try {
-                        get();
-                        loadWorktrees();
-                    } catch (Exception ex) {
-                        log.log(Level.WARNING, "Add worktree failed", ex);
-                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                        statusLbl.setText("Error: " + cause.getMessage());
-                        JOptionPane.showMessageDialog(WorktreesDialog.this,
-                                "Cannot add worktree:\n" + cause.getMessage(),
-                                "Error", JOptionPane.ERROR_MESSAGE);
-                    }
-                }
-            };
-            worker.execute();
+            ProgressWorker.builder()
+                    .task(() -> Context.getGitRepoService().addWorktree(path, branchName, newBranch))
+                    .onWorking(busy::set)
+                    .onSuccess(model.items()::refresh)
+                    .onException(ex -> failed("Add worktree failed", "Cannot add worktree", ex))
+                    .execute();
         }
     }
 
     private void onRemove() {
-        WorktreeInfo wt = getSelected();
+        WorktreeInfo wt = model.selection().item().get();
         if (wt == null) return;
         if (wt.isMain()) {
             JOptionPane.showMessageDialog(this,
@@ -167,85 +156,35 @@ public class WorktreesDialog extends JDialog {
         if (choice == JOptionPane.CANCEL_OPTION || choice == JOptionPane.CLOSED_OPTION) return;
         boolean force = (choice == JOptionPane.YES_OPTION);
 
-        statusLbl.setText("Removing worktree…");
-        setButtonsEnabled(false);
-
-        SwingWorker<Void, Void> worker = new SwingWorker<>() {
-            @Override
-            protected Void doInBackground() throws Exception {
-                Context.getGitRepoService().removeWorktree(wt.getPath(), force);
-                return null;
-            }
-            @Override
-            protected void done() {
-                setButtonsEnabled(true);
-                try {
-                    get();
-                    loadWorktrees();
-                } catch (Exception ex) {
-                    log.log(Level.WARNING, "Remove worktree failed", ex);
-                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                    statusLbl.setText("Error: " + cause.getMessage());
-                    JOptionPane.showMessageDialog(WorktreesDialog.this,
-                            "Cannot remove worktree:\n" + cause.getMessage(),
-                            "Error", JOptionPane.ERROR_MESSAGE);
-                }
-            }
-        };
-        worker.execute();
+        ProgressWorker.builder()
+                .task(() -> Context.getGitRepoService().removeWorktree(wt.getPath(), force))
+                .onWorking(busy::set)
+                .onSuccess(model.items()::refresh)
+                .onException(ex -> failed("Remove worktree failed", "Cannot remove worktree", ex))
+                .execute();
     }
 
     private void onOpen() {
-        WorktreeInfo wt = getSelected();
+        WorktreeInfo wt = model.selection().item().get();
         if (wt == null) return;
         selectedToOpen = wt;
         dispose();
     }
 
     private void onPrune() {
-        statusLbl.setText("Pruning…");
-        setButtonsEnabled(false);
-        SwingWorker<Void, Void> worker = new SwingWorker<>() {
-            @Override
-            protected Void doInBackground() throws Exception {
-                Context.getGitRepoService().pruneWorktrees();
-                return null;
-            }
-            @Override
-            protected void done() {
-                setButtonsEnabled(true);
-                try {
-                    get();
-                    loadWorktrees();
-                } catch (Exception ex) {
-                    log.log(Level.WARNING, "Prune worktrees failed", ex);
-                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                    statusLbl.setText("Error: " + cause.getMessage());
-                }
-            }
-        };
-        worker.execute();
+        ProgressWorker.builder()
+                .task(() -> Context.getGitRepoService().pruneWorktrees())
+                .onWorking(busy::set)
+                .onSuccess(model.items()::refresh)
+                .onException(ex -> log.log(Level.WARNING, "Prune worktrees failed", ex))
+                .execute();
     }
 
-    private WorktreeInfo getSelected() {
-        int row = table.getSelectedRow();
-        if (row < 0) return null;
-        return model.getRow(table.convertRowIndexToModel(row));
-    }
-
-    private void updateButtons() {
-        WorktreeInfo sel = getSelected();
-        boolean hasSelection = sel != null;
-        boolean isMain       = sel != null && sel.isMain();
-        removeBtn.setEnabled(hasSelection && !isMain);
-        openBtn.setEnabled(hasSelection);
-    }
-
-    private void setButtonsEnabled(boolean enabled) {
-        addBtn.setEnabled(enabled);
-        removeBtn.setEnabled(enabled);
-        openBtn.setEnabled(enabled);
-        pruneBtn.setEnabled(enabled);
+    private void failed(String logMessage, String errorMessage, Exception ex) {
+        log.log(Level.WARNING, logMessage, ex);
+        JOptionPane.showMessageDialog(this,
+                errorMessage + ":\n" + ex.getMessage(),
+                "Error", JOptionPane.ERROR_MESSAGE);
     }
 
     /** The worktree the user chose to open, or {@code null}. */
@@ -253,41 +192,34 @@ public class WorktreesDialog extends JDialog {
         return selectedToOpen;
     }
 
-    // ── Table model ───────────────────────────────────────────────────────────
+    // ── Table columns ─────────────────────────────────────────────────────────
 
-    private static class WorktreeTableModel extends AbstractTableModel {
+    private static final class WorktreeColumns implements TableColumns<WorktreeInfo, String> {
 
-        private static final String[] COLUMNS = { "Path", "Branch", "HEAD", "Status" };
-
-        private List<WorktreeInfo> data = new ArrayList<>();
-
-        void setData(List<WorktreeInfo> list) {
-            this.data = new ArrayList<>(list);
-            fireTableDataChanged();
-        }
-
-        WorktreeInfo getRow(int modelRow) {
-            return data.get(modelRow);
-        }
-
-        @Override public int getRowCount()    { return data.size(); }
-        @Override public int getColumnCount() { return COLUMNS.length; }
-        @Override public String getColumnName(int col) { return COLUMNS[col]; }
+        private static final List<String> COLUMNS = List.of(PATH, BRANCH, HEAD, STATUS);
 
         @Override
-        public Object getValueAt(int row, int col) {
-            WorktreeInfo wt = data.get(row);
-            return switch (col) {
-                case 0 -> wt.getPath();
-                case 1 -> wt.getBranch() != null ? wt.getBranch() : "(detached)";
-                case 2 -> wt.getShortHead();
-                case 3 -> wt.isMain()     ? "main"
-                        : wt.isLocked()   ? "locked"
-                        : wt.isPrunable() ? "prunable"
-                        :                   "";
+        public List<String> identifiers() {
+            return COLUMNS;
+        }
+
+        @Override
+        public Class<?> type(String column) {
+            return String.class;
+        }
+
+        @Override
+        public Object value(WorktreeInfo wt, String column) {
+            return switch (column) {
+                case PATH   -> wt.getPath();
+                case BRANCH -> wt.getBranch() != null ? wt.getBranch() : "(detached)";
+                case HEAD   -> wt.getShortHead();
+                case STATUS -> wt.isMain()     ? "main"
+                             : wt.isLocked()   ? "locked"
+                             : wt.isPrunable() ? "prunable"
+                             :                   "";
                 default -> "";
             };
         }
     }
-
 }
