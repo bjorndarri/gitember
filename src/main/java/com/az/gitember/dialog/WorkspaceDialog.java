@@ -194,15 +194,17 @@ public class WorkspaceDialog extends JDialog {
             return;
         }
 
-        Project[] options = candidates.toArray(new Project[0]);
-        JList<Project> chooser = new JList<>(options);
-        chooser.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        chooser.setCellRenderer(new ProjectCellRenderer());
-        int result = JOptionPane.showConfirmDialog(this, new JScrollPane(chooser),
-                "Select project(s) to add", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-        if (result == JOptionPane.OK_OPTION) {
-            workspace.getProjects().addAll(chooser.getSelectedValuesList());
+        try {
+            workspace.getProjects().addAll(Dialogs.select()
+                    .list(candidates)
+                    .owner(this)
+                    .title("Select project(s) to add")
+                    .renderer(new ProjectCellRenderer())
+                    .select()
+                    .multiple());
             loadIntoForm();
+        } catch (CancelException e) {
+            // cancelled
         }
     }
 
